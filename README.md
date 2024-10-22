@@ -40,6 +40,7 @@ OpenCGMES was created to address these challenges by providing an open-source, u
   - **.NET**: Support integration with dotNetRDF.
   - **Rust**: Support integration with Oxigraph.
   - **Python**: Support integration with rdflib.
+  - **Julia**: Support integration with ???.
 
 ## Current Hurdles
 
