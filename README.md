@@ -48,7 +48,7 @@ OpenCGMES was created to address these challenges by providing an open-source, u
 
 * **Missing Sample Data for CAS/NC**: There is currently a lack of publicly available sample data for the CAS/NC specifications, making it difficult to validate implementations and perform thorough testing.
 
-- **Missing Examples for JSON-LD Format**: There are currently no available examples for the upcoming JSON-LD format, making it difficult to test and validate JSON-LD conversion.
+- **Missing Examples for JSON-LD Format**: There are currently only few available examples for the upcoming JSON-LD format, making it difficult to test and validate JSON-LD conversion. (the current progress of the standardization of JSON-LD for CIM/CGMES is documented here: https://github.com/Sveino/Inst4CIM-KG/tree/develop/rdf-improved#json-ld-serialization)
 
 
 
