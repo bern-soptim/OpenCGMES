@@ -1,0 +1,338 @@
+= OpenCGMES Roadmap and Architecture
+:toc: left
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: highlight.js
+
+== Core Design Principles
+
+=== Version Support Strategy
+* Target CGMES 3.0 initially
+** Focus on getting a solid foundation with the latest standard
+** This approach allows for cleaner code without legacy support burden
+** CGMES 3.0 uses namespace `http://iec.ch/TC57/CIM100#`
+* CGMES 2.4.15 support will be considered later based on community needs
+** Would require namespace handling for `http://iec.ch/TC57/2013/CIM-schema-cim16#`
+* Clear separation of code that handles version-specific features through abstraction layers
+
+=== Data Processing Flow
+[plantuml]
+----
+@startuml
+skinparam componentStyle rectangle
+
+package "Input" {
+  [CGMES Files] as cgmes
+  [CGMES Zip Packages] as zip
+}
+
+package "Processing" {
+  [File Parser] as parser
+  [Schema Repository] as schemas
+  [Model Repository] as models
+  [Model Header Repository] as headers  
+  [Graph Manager] as graphMgr
+}
+
+package "View Layer" {
+  [SPARQL Datasets] as sparql
+  [Named Graphs] as graphs
+}
+
+package "Services" {
+  [SPARQL Query Engine] as queryEngine
+  [SHACL Validator] as validator
+}
+
+cgmes --> parser
+zip --> parser
+parser --> models
+parser --> headers
+schemas --> graphMgr
+models --> graphMgr
+headers --> graphMgr
+graphMgr --> graphs
+graphs --> sparql
+sparql --> queryEngine
+sparql --> validator
+
+@enduml
+----
+
+== Data Ingestion
+
+=== Input Formats
+* Individual CGMES profile files (XML/RDF)
+* ZIP packages containing multiple CGMES profile files
+* Automatic detection of contained profiles based on RDF schema references
+
+=== Processing Steps
+1. Parse and load files into in-memory representation
+2. Extract profile information
+3. Create namespace mappings based on detected CGMES version
+4. Organize into separate graph structures based on profile types
+5. Link to appropriate schema definitions
+
+== Graph Structure
+
+=== Graph Hierarchy
+
+==== Repository Level
+* Two main repositories maintained by the system:
+** Schema Repository: Contains all RDF schema definitions (read-only)
+** Instance Repository: Contains all instance data
+** Heder Repository: Contains all header data
+
+==== Dataset Level
+* Datasets are "views" over the repositories
+* Each dataset corresponds to an input file or ZIP package
+* Dataset name derived from input filename
+
+==== Graph Level
+* Multiple named graphs within each dataset
+* Separate graph for each profile type
+* Schema graphs, instance graphs, and header graphs clearly separated
+
+=== Naming Conventions in Detail
+
+==== Profile Graphs for Instance Data
+* Named using pattern: `cim:PROFILE_ABBREVIATION`
+* Examples:
+** For Equipment profile: `cim:EQ`
+** For Topology profile: `cim:TP`
+** For Steady State Hypothesis profile: `cim:SSH`
+** For Diagram Layout profile: `cim:DL`
+* Full internal naming for instance data repository: `md:Model.modelingAuthoritySet | md:Model.scenarioTime | PROFILE_ABBREVIATION | md:Model.mRID`
+* Example: http://conformity.eu/Planning/CGMES|2021-04-21T17:30:00Z|DL|urn:uuid:71d4b744-3b84-40f0-b17f-9a49a82ff18a 
+** Modeling Authority Set: http://conformity.eu/Planning/CGMES
+** Scenario Time: 2021-04-21T17:30:00Z
+** Profile Abbreviation: DL
+** Model MRID: urn:uuid:71d4b744-3b84-40f0-b17f-9a49a82ff18a
+
+
+==== Schema Graphs
+* Named using pattern: `cims:PROFILE_ABBREVIATION`
+* Examples:
+** For Equipment profile schema: `cims:EQ`
+** For Topology profile schema: `cims:TP`
+* Full internal naming for instance data repository: file name of the schema file
+Examples:
+** For Equipment profile schema
+*** in CGMES 3.0: `IEC61970-600-2_CGMES_3_0_0_RDFS2020_EQ.rdf`
+*** in CGMES 2.4.15: `EquipmentProfileCoreOperationShortCircuitRDFSAugmented-v2_4_15-4Sep2020.rdf`
+** For Steady State Hypothesis profile schema
+*** in CGMES 3.0: `IEC61970-600-2_CGMES_3_0_0_RDFS2020_SSH.rdf`
+*** in CGMES 2.4.15: `SteadyStateHypothesisProfileRDFSAugmented-v2_4_15-4Sep2020.rdf`
+
+==== Header Graphs
+* Named using pattern: `md:PROFILE_ABBREVIATION`
+* Examples:
+** For Equipment profile header: `md:EQ`
+** For Topology profile header: `md:TP`
+* Full internal naming for instance data repository: `md:Model.modelingAuthoritySet | md:Model.scenarioTime | PROFILE_ABBREVIATION | md:Model.mRID`
+
+
+=== Profile Abbreviation Discovery
+
+==== For CGMES 3.0
+* Abbreviation found in `<dcat:keyword>` of the `http://www.w3.org/2002/07/owl#Ontology` object
+* Example from the Diagram Layout RDFS file:
+
+[source,xml]
+----
+<rdf:Description rdf:about = "http://iec.ch/TC57/ns/CIM/DiagramLayout-EU#Ontology">
+    <owl:backwardCompatibleWith rdf:resource="http://iec.ch/TC57/61970-453/DiagramLayout/2/1"/>
+    <dcat:keyword>DL</dcat:keyword>
+    <owl:incompatibleWith rdf:resource="http://entsoe.eu/2009/profile1"/>
+    <!-- ... other properties ... -->
+</rdf:Description>
+----
+
+==== For CGMES 2.4.15
+* Abbreviation found in `<cims:isFixed>` with pattern: "The name of the class shall be the name of the profile + 'Version'." + `.shortName`
+* Example from Diagram Layout RDFS file:
+
+[source,xml]
+----
+<rdf:Description rdf:about="http://entsoe.eu/CIM/SchemaExtension/3/1#DiagramLayoutVersion.shortName">
+    <cims:stereotype rdf:resource="http://iec.ch/TC57/NonStandard/UML#attribute"/>
+    <rdfs:label xml:lang="en">shortName</rdfs:label>
+    <rdfs:domain rdf:resource="http://entsoe.eu/CIM/SchemaExtension/3/1#DiagramLayoutVersion"/>
+    <cims:dataType rdf:resource="#String"/>
+    <cims:multiplicity rdf:resource="http://iec.ch/TC57/1999/rdf-schema-extensions-19990926#M:1..1" />
+    <cims:isFixed rdf:datatype="http://www.w3.org/2001/XMLSchema#string">DL</cims:isFixed>
+    <rdfs:comment rdf:parseType="Literal">The short name of the profile used in profile documentation.</rdfs:comment>
+    <rdf:type rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#Property"/>
+</rdf:Description>
+----
+
+== Repository Implementation
+
+=== Schema Repository
+* Read-only repository containing all RDFS files
+* Singleton instance shared across the application
+* Graphs named after schema files for direct reference
+* Provides schema information for RDFS-aware queries
+* Enables inheritance hierarchies via `rdfs:subClassOf`
+
+=== Instance Repository
+* Contains all instance data from CGMES files
+* Graph naming follows the detailed pattern: 
+  `md:Model.modelingAuthoritySet | md:Model.scenarioTime | PROFILE_ABBREVIATION | md:Model.mRID`
+* Each instance has exactly one header (stored in separate graph in the header repository)
+* Repository enables efficient storage and retrieval of models
+
+=== Header Repository
+* Contains header data for each model
+* Graph naming follows the detailed pattern: 
+  `md:Model.modelingAuthoritySet | md:Model.scenarioTime | PROFILE_ABBREVIATION | md:Model.mRID`
+* Enables quick access to metadata without loading full model data
+
+
+== SPARQL Dataset Design
+
+=== Dataset Creation
+* One dataset created per imported file/package
+* Dataset name derived from the provided file name
+* Dataset is a "view" over the repositories, not a copy of the data
+* Creation process:
+  1. Analyze input file(s) to identify contained profiles
+  2. Identify corresponding schema definitions
+  3. Create named graph mappings
+  4. Configure the union graph
+
+=== Graph Organization Rationale
+* Separate named graphs for each profile improves:
+  ** Query performance (only access relevant graphs)
+  ** Data organization (clear separation of concerns)
+  ** Validation scenarios (profile-specific rules)
+* Default graph as a union of all separate graphs enables:
+  ** Compatibility with simple queries that don't use GRAPH patterns
+  ** Cross-profile validation
+  ** Simpler querying for users unfamiliar with named graphs
+
+=== Union Graph Implementation
+* Union graph is a projection which dynamically iterates over separate instance graphs
+* Not a physical copy of data, but a logical view
+* Implemented as a read-only union view to prevent inconsistencies
+
+=== RDFS-Enabled Queries
+* Schema inclusion enables inheritance-aware queries
+* Support for queries using `rdfs:subClassOf*` patterns
+* Property domain/range information available
+* Data type information accessible
+
+=== Modeing Authority Set (MAS) Filtering
+* Ability to filter views based on MAS identifiers
+* Dataset views can be constrained to specific MAS or list of MAS values
+* Enables querying across specific TSOs without changing query structure
+* When multiple MAS values are present, header data graphs are excluded
+
+=== Example Queries
+
+==== Basic Query Using Named Graphs
+
+This query fetches transformer end information with tap changer positions, using the appropriate named graphs:
+
+[source,sparql]
+----
+SELECT ?trafoEndMrid 
+       ?transformerName 
+       ?tapChanger ?tapChangerName ?tapChangerPosition      
+FROM NAMED <cim:EQ>
+FROM NAMED <cim:SSH>
+WHERE 
+{
+    GRAPH <cim:EQ> { 
+        ?trafoEndMrid 
+            a cim:PowerTransformerEnd;
+            cim:PowerTransformerEnd.PowerTransformer/cim:IdentifiedObject.name ?transformerName.
+        optional {        
+            ?trafoEndMrid ^(cim:RatioTapChanger.TransformerEnd | cim:PhaseTapChanger.TransformerEnd) ?tapChanger.
+            ?tapChanger cim:IdentifiedObject.name ?tapChangerName. 
+            GRAPH <cim:SSH> {    
+                ?tapChanger cim:TapChanger.step ?tapChangerPosition.
+            }
+        }
+    }    
+}
+----
+
+==== Query Using Type Inheritance (Schema-Aware)
+
+This query uses the schema information to find all switch instances, including subtypes like Breaker, Disconnector, etc.:
+
+[source,sparql]
+----
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT ?switchMrid ?switchName ?switchType
+FROM NAMED <cim:EQ>
+FROM NAMED <cims:EQ>
+WHERE {
+    GRAPH <cims:EQ> {
+        ?switchType rdfs:subClassOf* cim:Switch .
+    }
+    
+    GRAPH <cim:EQ> {
+        ?switchMrid a ?switchType;
+                   cim:IdentifiedObject.name ?switchName.
+    }
+}
+----
+
+==== Query Using Default Union Graph
+
+This query works without named GRAPH patterns, relying on the default union graph:
+
+[source,sparql]
+----
+SELECT ?bus ?busName ?voltage
+WHERE {
+    ?bus a cim:BusbarSection;
+         cim:IdentifiedObject.name ?busName;
+         cim:ConductingEquipment.BaseVoltage/cim:BaseVoltage.nominalVoltage ?voltage.
+}
+ORDER BY DESC(?voltage)
+----
+
+== Memory Management Considerations
+
+=== In-Memory Processing
+* All data maintained in memory for maximum performance
+* No persistence layer or triple store required
+* Suitable for large-scale models (later):
+  ** European grid models for 24 hours could fit in ~24GB RAM
+  ** Delta graph techniques could be used to reduce memory footprint
+
+== Future Extensions
+
+Prioritized list of features planned for future development:
+
+=== Difference Model Support
+* Support for CGMES difference models planned for later phases
+* Will enable efficient updates to existing models
+* Implementation will follow after core functionality is stable
+
+=== API Extensions
+* REST API for remote access
+* gRPC interface for high-performance system integration
+* Client libraries for various programming languages
+
+=== SHACL Validation (later)
+* Support for profile-specific validation rules
+* Cross-profile validation enabled by the union graph
+* ENTSO-E published SHACL files supported
+* Validation results provided in standard formats
+
+=== Memory Optimization (later)
+* Delta graphs used to efficiently store time series data
+* Only differences between time points stored, not full copies
+* Reference data (like schema definitions) shared across repositories
+* Efficient string interning to reduce duplication
+
+=== Conversion Capabilities (later)
+* JSON-LD conversion for modern API integrations
+* Standardized output formats following emerging standards
+* CGMES-specific serialization rules respected
+
