@@ -63,7 +63,7 @@ POST /model/{filename}/branch/{branchName}/update
 For nested branches, use a flat path-based approach:
 
 ```
-GET /model/{filename}/branches/{branchPath}/query
+GET /model/{filename}/branch/{branchPath}/query
 ```
 
 Where:
