@@ -1,0 +1,250 @@
+= OpenCGMES Architecture Decision Record (ADR)
+:toc: left
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: highlight.js
+
+== ADR-001: Single CGMES Version Support Per Instance
+
+=== Status
+Accepted
+
+=== Context
+The Common Grid Model Exchange Standard (CGMES) has different versions, most notably CGMES 2.4.15 and CGMES 3.0, which use different XML namespaces:
+
+* CGMES 2.4.15 uses namespace `http://iec.ch/TC57/2013/CIM-schema-cim16#`
+* CGMES 3.0 uses namespace `http://iec.ch/TC57/CIM100#`
+
+Supporting multiple CGMES versions simultaneously within a single instance of OpenCGMES presents several challenges:
+
+1. Different prefix mappings would be required for different versions, making it difficult to maintain a consistent "cim:" prefix across the system.
+2. SPARQL queries would need to be version-aware, potentially requiring different queries for different CGMES versions.
+3. Named graph patterns would become more complex if they needed to accommodate version-specific namespaces.
+4. Code complexity would increase significantly with conditional logic to handle different namespace resolutions.
+
+=== Decision
+Each instance of OpenCGMES will support exactly one CGMES version at a time. Initially, the focus will be on CGMES 3.0, with CGMES 2.4.15 support considered as a separate implementation path later, based on community needs.
+
+=== Consequences
+
+==== Positive
+* Simplified prefix management with consistent "cim:" prefix usage
+* Standardized SPARQL queries that work uniformly within an instance
+* Cleaner codebase without conditional namespace handling
+* Better performance without dynamic prefix resolution
+* Focused development efforts on getting one version right before expanding
+
+==== Negative
+* Users needing to work with multiple CGMES versions will need to run multiple instances
+* Migration between versions not inherently supported within a single instance
+* Potentially some duplication of code between version-specific implementations
+
+=== Implementation Notes
+* Provide clear version selection mechanism during initialization
+* Document this limitation clearly for users
+* Consider developing utilities to assist with data migration between versions
+
+== ADR-002: In-Memory Processing Model
+
+=== Status
+Accepted
+
+=== Context
+CGMES data processing often involves large volumes of data that need to be accessed quickly for grid calculations and analysis. Traditional approaches using persistent storage like triple stores or databases might introduce performance bottlenecks for time-critical operations.
+
+=== Decision
+OpenCGMES will use an in-memory processing model with no persistence layer. All data, including RDF graphs, will be maintained in memory for maximum performance.
+
+=== Consequences
+
+==== Positive
+* Maximum performance for data access and queries
+* Simplified architecture without database integration
+* Reduced latency for time-critical operations
+* Easier deployment without external database dependencies
+
+==== Negative
+* Higher memory consumption (estimated ~24GB RAM for European grid models for 24 hours)
+* No built-in persistence between application restarts
+* Potential limitations based on host system memory constraints
+
+=== Implementation Notes
+* Consider memory optimization techniques such as:
+  ** Delta graphs for efficient storage of time series data
+  ** String interning to reduce duplication
+  ** Shared reference data across repositories
+* Document memory requirements clearly for users
+
+== ADR-003: Graph-Based Repository Structure
+
+=== Status
+Accepted
+
+=== Context
+CGMES data is inherently graph-based, with complex relationships between different profile types (EQ, TP, SSH, DL, etc.). A well-organized repository structure is needed to manage these relationships while maintaining performance and clarity.
+
+=== Decision
+Implement a structured repository system with:
+
+1. *Separate Repositories* for different types of data:
+   * Schema Repository (read-only, containing all RDFS files)
+   * Instance Repository (containing all instance data)
+   * Header Repository (containing all header data)
+
+2. *Named Graphs* following a specific pattern:
+   * Profile Graphs: `cim:PROFILE_ABBREVIATION`
+   * Schema Graphs: `cims:PROFILE_ABBREVIATION`
+   * Header Graphs: `md:PROFILE_ABBREVIATION`
+
+3. *Full Internal Naming* for instance data:
+   `md:Model.modelingAuthoritySet | md:Model.scenarioTime | PROFILE_ABBREVIATION | md:Model.mRID`
+
+=== Consequences
+
+==== Positive
+* Clear separation of concerns between schema, instance, and header data
+* Efficient profile-specific queries
+* Organized structure that mirrors CGMES design
+* Support for RDFS-enabled queries with inheritance awareness
+* Easier validation with profile-specific rules
+
+==== Negative
+* More complex initial setup compared to a flat graph structure
+* Learning curve for users unfamiliar with named graphs
+* Additional overhead in graph management
+
+=== Implementation Notes
+* Implement union graph as a projection over separate instance graphs
+* Ensure efficient cross-profile querying through the default graph
+* Document naming conventions clearly for users
+
+== ADR-004: SPARQL as Primary Query Interface
+
+=== Status
+Accepted
+
+=== Context
+Accessing and analyzing CGMES data requires a powerful query interface that can handle complex graph traversals and data relationships. Various query approaches could be implemented, from custom APIs to standard query languages.
+
+=== Decision
+Use SPARQL as the primary query interface for OpenCGMES, with support for:
+
+1. Named graph patterns for profile-specific queries
+2. RDFS-enabled queries leveraging schema information
+3. Union graph for cross-profile queries
+
+=== Consequences
+
+==== Positive
+* Leverages existing industry standard query language
+* Powerful expressiveness for complex grid model queries
+* Familiar to many users already working with RDF data
+* Enables inheritance-aware queries using `rdfs:subClassOf*` patterns
+* Consistent with RDF/CGMES ecosystem
+
+==== Negative
+* Steeper learning curve for users unfamiliar with SPARQL
+* Potential performance considerations for very complex queries
+* Less type safety compared to a strongly-typed API
+
+=== Implementation Notes
+* Provide example queries for common use cases
+* Consider query optimization techniques
+* Document best practices for efficient SPARQL usage
+
+== ADR-005: Initial Focus on Read Operations
+
+=== Status
+Accepted
+
+=== Context
+CGMES data can be read, validated, transformed, and modified. Each of these operations adds complexity to the implementation. A phased approach is needed to ensure solid foundations before adding more complex functionality.
+
+=== Decision
+Initially focus on read operations, validation, and transformation, with data manipulation via SPARQL Updates considered as a future extension.
+
+=== Consequences
+
+==== Positive
+* Simplifies initial implementation
+* Ensures core functionality is solid before adding complexity
+* Allows for thorough testing of read operations
+* Aligns with immediate needs of most users
+
+==== Negative
+* Initial versions will have limited write capabilities
+* Users needing to modify CGMES data will need to use alternative methods
+* May require rework when adding update capabilities later
+
+=== Implementation Notes
+* Design repository structure with future update operations in mind
+* Document the read-only nature of initial versions
+* Plan for SPARQL Update support in roadmap
+
+== ADR-006: API Layering Strategy
+
+=== Status
+Accepted
+
+=== Context
+Different users and systems will need to interact with OpenCGMES in various ways, from direct library integration to remote service calls. A clear API strategy is needed to support these diverse use cases.
+
+=== Decision
+Implement a layered API approach:
+
+1. Core Java API for direct programmatic access
+2. REST API (planned) for remote access
+3. gRPC interface (planned) for high-performance system integration
+4. Client libraries (planned) for various programming languages
+
+=== Consequences
+
+==== Positive
+* Flexibility for different integration scenarios
+* Support for diverse technology stacks
+* Separation between core functionality and access methods
+* Future-proofing for evolving integration needs
+
+==== Negative
+* Additional development effort to maintain multiple APIs
+* Potential consistency challenges across different interfaces
+* More complex testing requirements
+
+=== Implementation Notes
+* Design core functionality with API-agnostic approach
+* Implement Java API first, then extend to REST and gRPC
+* Consider auto-generation of client libraries where possible
+
+== ADR-007: Schema-Aware Query Support
+
+=== Status
+Accepted
+
+=== Context
+CGMES data follows complex schema definitions with inheritance hierarchies and property relationships. Queries can be made more powerful and flexible by leveraging this schema information.
+
+=== Decision
+Implement schema-aware query support that:
+
+1. Includes schema graphs in query datasets
+2. Enables inheritance-aware queries using `rdfs:subClassOf*` patterns
+3. Provides access to property domain/range information
+4. Makes data type information accessible
+
+=== Consequences
+
+==== Positive
+* More powerful queries leveraging type hierarchies
+* Simplified querying for complex class structures
+* Better alignment with RDF/RDFS capabilities
+* Reduced need for explicit type enumeration in queries
+
+==== Negative
+* Larger memory footprint with schema information loaded
+* Potential performance impact for schema-heavy queries
+
+=== Implementation Notes
+* Ensure efficient loading and indexing of schema information
+* Provide examples of schema-aware queries
+* Consider optimization techniques for common inheritance patterns
