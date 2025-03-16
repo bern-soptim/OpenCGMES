@@ -327,3 +327,62 @@ Implement a delta-based editing model using the Command Query Responsibility Seg
 * Implement efficient delta storage and retrieval mechanisms
 * Develop clear conflict detection and resolution strategies
 * Document the branching and merging model for users
+
+
+== ADR-010: API Versioning Strategy
+
+=== Status
+Accepted
+
+=== Context
+As OpenCGMES develops REST and gRPC APIs for external access, a clear strategy for API versioning is needed to ensure:
+
+1. Backward compatibility for existing clients as the API evolves
+2. Clear expectations for API consumers regarding stability and changes
+3. Flexibility to introduce breaking changes when necessary
+4. Maintainable codebase without excessive version-specific code paths
+
+The need for versioning arises from the reality that APIs evolve over time as requirements change, bugs are fixed, and new features are added. However, once an API is published and in use by clients, changes can potentially break those clients. A versioning strategy helps manage this evolution while minimizing disruption.
+
+=== Decision
+Implement a path-based versioning strategy for all OpenCGMES APIs:
+
+1. *URL Path Versioning*: Include the major version number in the base URL path
+   * Example: `/api/v1/model/{filename}/query`
+
+2. *Version Lifecycles*:
+   * Major versions (v1, v2) indicate potentially breaking changes
+   * Minor versions are documented but don't change the URL path
+   * Patch versions address bugs without changing behavior
+
+3. *Version Support Policy*:
+   * At least two major versions will be supported simultaneously
+   * Deprecated versions will have a minimum 6-month sunset period
+   * Version deprecation announcements will be clearly communicated
+
+4. *Documentation*:
+   * Each version will have separate, complete API documentation
+   * Migration guides will be provided between major versions
+   * Changelog will track all changes, including minor and patch updates
+
+=== Consequences
+
+==== Positive
+* Clear indication of API version in URLs makes it obvious which version a client is using
+* Ability to introduce breaking changes in new major versions while maintaining backward compatibility
+* Simplified routing and request handling in the implementation
+* Consistent approach across all API endpoints
+* Developer-friendly as the version is visible in all API references
+
+==== Negative
+* Potential duplication of code for supporting multiple API versions simultaneously
+* Requires disciplined documentation of changes between versions
+* Additional maintenance burden for supporting multiple versions during transition periods
+* Client applications need to explicitly update URLs when migrating versions
+
+=== Implementation Notes
+* Use Spring RequestMapping at the controller class level to specify version prefix
+* Consider leveraging interface inheritance for version compatibility where appropriate
+* Implement API monitoring to track usage by version for deprecation planning
+* Document version differences in OpenAPI/Swagger specifications
+* Consider using feature flags for new capabilities that might eventually span versions

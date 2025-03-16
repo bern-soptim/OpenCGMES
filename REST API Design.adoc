@@ -1,0 +1,177 @@
+# OpenCGMES REST API Design
+
+## Overview
+
+This document describes the REST API design for OpenCGMES, focusing on URL path structures for SPARQL endpoints and SHACL validation. The API follows RESTful principles and is designed to be intuitive, consistent, and flexible enough to accommodate the complex model hierarchy of CGMES data.
+
+## URL Path Structure
+
+The API is organized around the following core resources:
+
+- Models (imported CGMES files or packages)
+- Branches (delta-based editing sessions)
+- Modeling Authority Sets (MAS)
+- SHACL validation profiles and results
+
+### Base URL
+
+All API endpoints are relative to a base URL:
+
+```
+https://{server}/api/v1
+```
+
+## SPARQL Endpoints
+
+### Model Queries
+
+Base endpoint for querying a model:
+
+```
+GET /model/{filename}/query
+```
+
+Where:
+- `{filename}` is the URL-encoded name of the imported file or package
+
+Query parameters:
+- `query`: The SPARQL query to execute (for GET requests)
+- `format`: Response format (json, xml, csv, etc.)
+
+For POST requests, the query is sent in the request body:
+
+```
+POST /model/{filename}/query
+```
+
+### Branch-Specific Queries
+
+For queries on specific branches:
+
+```
+GET /model/{filename}/branch/{branchName}/query
+```
+
+For updates to branches:
+
+```
+POST /model/{filename}/branch/{branchName}/update
+```
+
+### Nested Branches
+
+For nested branches, use a flat path-based approach:
+
+```
+GET /model/{filename}/branches/{branchPath}/query
+```
+
+Where:
+- `{branchPath}` is a slash-separated path of branch names (e.g., `main/feature-x/bugfix-y`)
+
+This structure avoids deep nesting in the URL path while still clearly representing the branch hierarchy, preventing potential URL length limitations and making paths more readable.
+
+### MAS-Specific Views
+
+For filtering by Modeling Authority Set:
+
+```
+GET /model/{filename}/mas/{masId}/query
+```
+
+For multiple MAS filtering:
+
+```
+GET /model/{filename}/mas/{masId1},{masId2},{masId3}/query
+```
+
+**Implementation Note**: MAS-filtered views are created using lazy initialization. The view is only created on the first request and then persisted for subsequent requests. This approach prevents creating potentially unused views upfront while ensuring optimal performance for repeated access.
+
+## SHACL Validation
+
+### Validation Repository
+
+SHACL validation files are organized in a separate repository with graph names matching the validation file names.
+
+### Triggering Validation
+
+To validate a model against specific SHACL files:
+
+```
+POST /model/{filename}/validate
+```
+
+Request body:
+```json
+{
+  "shaclFiles": ["EQ_452.rdf", "SSH_301.rdf"]
+}
+```
+
+For branch-specific validation:
+
+```
+POST /model/{filename}/branch/{branchName}/validate
+```
+
+### Accessing Validation Results
+
+To retrieve validation results:
+
+```
+GET /model/{filename}/validation-results/{shaclFileName}
+```
+
+For branch-specific results:
+
+```
+GET /model/{filename}/branch/{branchName}/validation-results/{shaclFileName}
+```
+
+Query parameters:
+- `format`: Response format (json, xml, etc.)
+- `includeValid`: Whether to include valid nodes (default: false)
+- `severity`: Filter by severity level (info, warning, error, etc.)
+
+<!-- Historical validation results section removed as per request -->
+
+## Error Handling
+
+All endpoints follow consistent error response formats:
+
+- 400: Bad Request - Invalid input parameters
+- 404: Not Found - Resource not found
+- 500: Internal Server Error - Unexpected error
+
+Error response body:
+```json
+{
+  "status": 400,
+  "message": "Invalid SPARQL query syntax",
+  "details": "Line 5: Unexpected token..."
+}
+```
+
+## Implementation Considerations
+
+### URL Length Limitations
+
+While Spring Boot itself doesn't impose strict URL path length limitations, be aware that:
+
+1. Some web servers and proxies might limit URL lengths (typically 2000-8000 characters)
+2. Very long branch paths or filenames may approach these limits in rare cases
+3. For extremely complex nested structures, consider the path-based approach or query parameters
+
+### URL Encoding
+
+All path variables should be properly URL-encoded, especially:
+- Filenames which may contain special characters
+- MAS identifiers which often contain URIs
+- Branch names which may contain user-provided strings
+
+### Performance Considerations
+
+For long-running SPARQL queries or validation operations, consider:
+1. Implementing asynchronous processing with status endpoints
+2. Adding timeout parameters to prevent resource exhaustion
+3. Paginating large result sets
