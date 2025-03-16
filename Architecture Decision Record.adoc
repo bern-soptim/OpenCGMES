@@ -247,3 +247,83 @@ Implement schema-aware query support that:
 * Ensure efficient loading and indexing of schema information
 * Provide examples of schema-aware queries
 * Consider optimization techniques for common inheritance patterns
+
+== ADR-008: Simplified Graph Naming Convention
+
+=== Status
+Accepted
+
+=== Context
+The initially proposed full internal naming convention for graphs (using `md:Model.modelingAuthoritySet | md:Model.scenarioTime | PROFILE_ABBREVIATION | md:Model.mRID`) introduces unnecessary complexity. This complexity becomes particularly problematic when considering validation and resolution of superseded and dependentOn model references in headers.
+
+=== Decision
+Simplify the internal naming to use only `md:Model.mRID` for both instance and header repositories:
+
+1. *Separate Repositories* remain as before:
+   * Schema Repository (read-only)
+   * Instance Repository (containing instance data)
+   * Header Repository (containing header data)
+
+2. *Named Graphs* follow the pattern:
+   * Profile Graphs: `cim:PROFILE_ABBREVIATION`
+   * Schema Graphs: `cims:PROFILE_ABBREVIATION`
+   * Header Graphs: `md:PROFILE_ABBREVIATION`
+
+3. *Internal Naming* simplified to use only `md:Model.mRID` as the unique identifier for both instance and header repositories
+
+=== Consequences
+
+==== Positive
+* Reduced complexity in the naming system
+* Easier validation and resolution of model references
+* Clearer framework for treating graphs as immutable in a read-only context
+* Simplifies implementation and maintenance
+
+==== Negative
+* Less information encoded directly in the naming convention
+* May require additional lookups to determine modeling authority and scenario time
+
+=== Implementation Notes
+* Ensure that modeling authority and scenario time information remains easily accessible
+* Update dataset views to reflect the simplified naming convention
+* Document the transition for any existing implementations
+
+== ADR-009: Delta-Based Editing Model with Event Sourcing
+
+=== Status
+Draft (Under Review)
+
+=== Context
+CGMES models are identified by mRIDs, and any change to instance data invalidates the associated header. Traditional editing approaches would require generating new mRIDs for every edit, leading to challenges in maintaining consistency and tracking changes. Additionally, multi-user collaborative editing requires a mechanism for branching, merging, and conflict resolution.
+
+=== Decision
+Implement a delta-based editing model using the Command Query Responsibility Segregation (CQRS) pattern with event sourcing that:
+
+1. Treats original imported models as immutable baseline states
+2. Records all changes as explicit delta operations (events) in an event store
+3. Uses delta graphs as the foundation for representing changes
+4. Provides views that apply sequences of deltas to baseline models
+5. Supports branching and merging of edit streams
+6. Only generates new mRIDs when publishing/exporting modified models
+7. Implements optimistic locking for conflict detection during merges
+
+=== Consequences
+
+==== Positive
+* Preserves all original data and maintains complete edit history
+* Enables efficient storage of changes without duplicating unchanged data
+* Provides clear lineage and traceability between model versions
+* Supports collaborative editing with branching and merging
+* Allows for reverting changes or creating alternative scenarios
+* Minimizes the need for new mRID generation during the editing process
+
+==== Negative
+* Increased complexity in the overall system architecture
+* Performance considerations for nested delta graphs buildung long chains
+* Additional tooling required for effective conflict resolution
+
+=== Implementation Notes
+* Design a clean command API for recording edit operations
+* Implement efficient delta storage and retrieval mechanisms
+* Develop clear conflict detection and resolution strategies
+* Document the branching and merging model for users

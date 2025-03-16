@@ -1,0 +1,367 @@
+= Delta-Based Editing Workflow for OpenCGMES (Draft)
+:toc: left
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: highlight.js
+
+== Overview
+
+This document describes the user workflow and internal architecture for implementing delta-based editing of CGMES models in OpenCGMES. The approach uses CQRS with event sourcing to enable collaborative editing while maintaining data integrity and traceability.
+
+== Restraints
+
+A fully fledged CQRS-store shall not be implmented in OpenCGMES. The current implementation is a simplified version of CQRS with event sourcing, without persisting the events. The events are only used to generate the delta models in-memory.
+There are commercial solutions for the persistence of RDF graphs, delta-graphs and events. (for example the `RICO-RDF-Core` from https://www.soptim.de[SOPTIM AG])
+
+== User Workflow
+
+=== 1. Import and Baseline Creation
+
+[plantuml]
+----
+@startuml
+skinparam activityFontSize 14
+skinparam noteFontSize 12
+
+start
+:User imports CGMES model file(s);
+:System registers model in Instance Repository;
+:System extracts header to Header Repository;
+:System creates new Baseline Version;
+note right: Original mRIDs preserved
+:User receives confirmation of successful import;
+stop
+@enduml
+----
+
+When a user imports CGMES model files, the system:
+
+1. Parses the files and loads them into the Instance Repository with original mRIDs preserved
+2. Extracts the header information to the Header Repository
+3. Records this as a baseline version (immutable starting point)
+4. Makes this model available for viewing and querying
+
+=== 2. Starting an Edit Session
+
+[plantuml]
+----
+@startuml
+skinparam activityFontSize 14
+skinparam noteFontSize 12
+
+start
+:User selects a model to edit;
+:User creates new branch (or uses main);
+note right: Branch has unique ID
+:System creates an edit session;
+:System initializes empty delta graphs for this branch in the edit repository;
+:User receives an editable view of current model state;
+stop
+@enduml
+----
+
+To begin editing:
+
+1. User selects a model from the repository
+2. User creates a new named branch (or uses the main branch)
+3. System creates an edit session with a unique session ID
+4. System initializes empty delta graphs for this branch in the edit repository 
+5. User works with a delta view that initially matches the baseline
+
+=== 3. Making Edits
+
+[plantuml]
+----
+@startuml
+skinparam activityFontSize 14
+skinparam noteFontSize 12
+
+start
+:User performs edit operation;
+:System converts edit to command;
+:System validates command;
+
+if (Valid command?) then (yes)
+  :System records command as event;
+  :System applies delta to view;
+  :User sees updated model view;
+else (no)
+  :System rejects edit;
+  :User notified of validation error;
+endif
+stop
+@enduml
+----
+
+During editing:
+
+1. User performs edits through the UI (e.g., modifying equipment parameters, adding/removing components)
+2. Each edit is converted to a command (e.g., `ModifyTransformerRatioCommand`, `AddBreakpointCommand`)
+3. System validates the command against business rules and CGMES schema
+4. If valid, the command is:
+   a. Recorded as an event in the delta stream for this branch
+   b. Applied to the delta graphs in the edit repository
+   c. Reflected immediately in the user's view
+5. If invalid, the edit is rejected with appropriate feedback
+
+=== 4. Branching and Collaboration
+
+[plantuml]
+----
+@startuml
+skinparam activityFontSize 14
+skinparam noteFontSize 12
+
+start
+:User A creates a branch "feature-X";
+:User A makes edits on branch "feature-X";
+
+fork
+  :User B creates branch "feature-Y" from main;
+  :User B makes different edits;
+fork again
+  :User A continues editing "feature-X";
+end fork
+
+:Later, User B wants to incorporate User A's changes;
+:User B merges branch "feature-X" into "feature-Y";
+
+if (Conflicts?) then (yes)
+  :System identifies conflicts;
+  :User B resolves conflicts manually;
+else (no)
+  :Automatic merge succeeds;
+endif
+
+:Both users continue with merged state;
+stop
+@enduml
+----
+
+For collaborative editing:
+
+1. Multiple users can create branches from any baseline or existing branch
+2. Each branch maintains its own delta stream
+3. Users can periodically merge changes between branches
+4. During merges, the system:
+   a. Identifies conflicting deltas (e.g., both modified the same transformer)
+   b. Auto-resolves non-conflicting changes
+   c. Presents conflicts to users for manual resolution
+5. The result is a new combined delta stream
+
+=== 5. Exporting Modified Models
+
+[plantuml]
+----
+@startuml
+skinparam activityFontSize 14
+skinparam noteFontSize 12
+
+start
+:User finalizes edits;
+:User initiates export;
+:System validates complete model;
+
+if (Valid model?) then (yes)
+  :System generates new mRIDs for changed elements;
+  :System creates new model header with dependencies;
+  note right: References original model\nas dependency or superseded
+  :System exports CGMES files;
+  :User receives exported files;
+else (no)
+  :System shows validation errors;
+  :User addresses issues;
+endif
+stop
+@enduml
+----
+
+When exporting:
+
+1. User finalizes edits and initiates an export operation
+2. System validates the complete model against CGMES rules
+3. If valid, the system:
+   a. Generates new mRIDs for changed elements
+   b. Creates a new model header with appropriate references:
+      - `dependentOn` relationships to unchanged profiles
+      - `supersedes` relationships to changed profiles
+   c. Exports the model as standard CGMES files
+   d. The exported model is copied to the header and instance 
+      repositories and a new view is created
+4. If invalid, validation errors are presented for correction
+
+== Internal Architecture
+
+=== Repository Structure
+
+[plantuml]
+----
+@startuml
+package "Read Model" {
+  [Schema Repository] as SchemaRepo
+  [Instance Repository] as InstanceRepo
+  [Header Repository] as HeaderRepo
+  [Edit Repository] as EditRepo
+}
+
+package "Write Model" {
+  [Command Processor] as CmdProc
+  [Event Store] as EventStore
+  [Branch Manager] as BranchMgr
+}
+
+package "Services" {
+  [Dataset View Service] as DatasetSvc
+  [SPARQL Service] as SparqlSvc
+  [Edit Session Service] as EditSvc
+  [Export Service] as ExportSvc
+  [Merge Service] as MergeSvc
+}
+
+SchemaRepo <-- DatasetSvc
+InstanceRepo <-- DatasetSvc
+HeaderRepo <-- DatasetSvc
+EditRepo <-- DatasetSvc
+DatasetSvc <-- SparqlSvc
+
+CmdProc --> EventStore
+BranchMgr --> EventStore
+
+EditSvc --> CmdProc
+EditSvc --> BranchMgr
+EditSvc --> EditRepo
+MergeSvc --> BranchMgr
+MergeSvc --> EditRepo
+ExportSvc --> EditRepo
+ExportSvc --> HeaderRepo
+ExportSvc --> InstanceRepo
+
+@enduml
+----
+
+The system implements CQRS by dividing into:
+
+1. *Read Model*:
+   * Schema Repository - Stores RDFS schemas (immutable)
+   * Instance Repository - Stores baseline instance data (immutable)
+   * Header Repository - Stores baseline headers (immutable)
+   * Edit Repository - Stores editable delta graphs
+
+2. *Write Model*:
+   * Command Processor - Validates and processes edit commands
+   * Event Store - Records all edit events in sequence
+   * Branch Manager - Handles branch creation and merging
+
+=== Graph and Dataset Organization
+
+==== Graphs
+* *Instance, header and edit repository Graphs*: `Model.mRID`
+  * Example: `urn:uuid:71d4b744-3b84-40f0-b17f-9a49a82ff18a`
+
+==== Dataset Views
+* *Baseline Dataset*: Original imported model
+  * Contains baseline instance and header graphs with original mRIDs
+  * View name is the file name
+* *Branch Dataset*: Editable branch of an imported model
+  * Contains delta graphs based on baseline
+  * View name is the branch name
+* *Export Dataset*: Final version for export
+  * Is the export of branch dataset with new Model.mRIDs 
+    and headers into a baseline dataset
+
+=== Delta Generation and Application (Theoretical Overview)
+
+The system handles deltas through:
+
+1. *Command Recording*:
+   * Each edit command is recorded as an event
+   * Events contain:
+     - Command type (Add/Modify/Remove)
+     - Target resource mRID
+     - Property path
+     - Old value (for modify/remove)
+     - New value (for add/modify)
+     - Timestamp and user information
+
+2. *Delta Generation*:
+   * Events are transformed into CGMES difference models
+   * Difference models use standard CGMES constructs:
+     - `rdf:about` for identifying modified resources
+     - Regular property assertions for new values
+
+3. *Snapshot Process*:
+   * Baseline model loaded
+   * Deltas applied in sequence to create current view
+   * Working mRIDs used during editing
+   * New final mRIDs generated only during export
+
+=== Conflict Resolution (conceptual)
+
+During merges:
+
+1. *Conflict Detection*:
+   * System compares delta streams from different branches
+   * Identifies when both streams modified the same resource+property
+   * Creates a conflict record with both values
+
+2. *Conflict Resolution Strategies*:
+   * Auto-resolution for non-conflicting changes
+   * Manual resolution UI for conflicting changes
+   * Options to: 
+     - Take "mine" (current branch)
+     - Take "theirs" (merging branch)
+     - Create new value
+     - Accept both (where applicable)
+
+3. *Resolution Recording*:
+   * Resolution decisions recorded as special merge events
+   * Complete audit trail maintained
+
+== Export Process in Detail
+
+The export process is particularly important as it bridges the internal delta-based editing with standard CGMES:
+
+1. *Consistency Validation* (optional):
+   * Complete model validation against CGMES rules
+   * Cross-profile reference checking
+   * Business rule validation
+
+2. *mRID Management*:
+   * Generate new mRIDs for modified resources
+   * Maintain original mRIDs for unchanged resources
+   * Update references to maintain consistency
+
+3. *Header Generation*:
+   * Create new CGMES-compliant headers with:
+     - New model mRID for each modified profile
+     - `dependentOn` references to unchanged profiles
+     - `supersedes` references to original versions for modified profiles
+     - Proper modeling authority set and timestamps
+
+4. *Build Basline Model*:
+   * Create new entries in the instance and header repositories
+   * Create new view
+
+5. *Serialization*:
+   * Serailizatin should be available to all views.
+   * Convert model to standard CGMES XML format
+   * Package profiles according to CGMES standards
+   * Include generated headers
+   * Create individual files or ZIP package based on user preference
+
+== Implementation Considerations
+
+=== User Experience (ideas)
+
+1. *Real-time Collaboration*:
+   * Live updates of branch status
+   * Notification of merge opportunities
+
+2. *Visual Diff Tools*:
+   * Graphical representation of changes
+   * Network diagram with highlighted changes
+
+3. *Simplified Branching UI*:
+   * Branch visualization and management
+   * Merge previews and conflict indicators
