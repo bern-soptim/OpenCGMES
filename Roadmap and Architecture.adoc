@@ -98,39 +98,34 @@ sparql --> validator
 
 ==== Profile Graphs for Instance Data
 * Named using pattern: `cim:PROFILE_ABBREVIATION`
-* Examples:
-** For Equipment profile: `cim:EQ`
-** For Topology profile: `cim:TP`
-** For Steady State Hypothesis profile: `cim:SSH`
-** For Diagram Layout profile: `cim:DL`
-* Full internal naming for instance data repository: `md:Model.modelingAuthoritySet | md:Model.scenarioTime | PROFILE_ABBREVIATION | md:Model.mRID`
-* Example: http://conformity.eu/Planning/CGMES|2021-04-21T17:30:00Z|DL|urn:uuid:71d4b744-3b84-40f0-b17f-9a49a82ff18a 
-** Modeling Authority Set: http://conformity.eu/Planning/CGMES
-** Scenario Time: 2021-04-21T17:30:00Z
-** Profile Abbreviation: DL
-** Model MRID: urn:uuid:71d4b744-3b84-40f0-b17f-9a49a82ff18a
+** Examples:
+*** For Equipment profile: `cim:EQ`
+*** For Topology profile: `cim:TP`
+*** For Steady State Hypothesis profile: `cim:SSH`
+*** For Diagram Layout profile: `cim:DL`
+* Full internal naming for instance data repository: `md:Model.mRID`
+** Example: `urn:uuid:71d4b744-3b84-40f0-b17f-9a49a82ff18a`
 
 
 ==== Schema Graphs
 * Named using pattern: `cims:PROFILE_ABBREVIATION`
-* Examples:
-** For Equipment profile schema: `cims:EQ`
-** For Topology profile schema: `cims:TP`
+** Examples:
+*** For Equipment profile schema: `cims:EQ`
+*** For Topology profile schema: `cims:TP`
 * Full internal naming for instance data repository: file name of the schema file
-Examples:
-** For Equipment profile schema
+** Examples for Equipment profile schema:
 *** in CGMES 3.0: `IEC61970-600-2_CGMES_3_0_0_RDFS2020_EQ.rdf`
 *** in CGMES 2.4.15: `EquipmentProfileCoreOperationShortCircuitRDFSAugmented-v2_4_15-4Sep2020.rdf`
-** For Steady State Hypothesis profile schema
+** Examples for  Steady State Hypothesis profile schema
 *** in CGMES 3.0: `IEC61970-600-2_CGMES_3_0_0_RDFS2020_SSH.rdf`
 *** in CGMES 2.4.15: `SteadyStateHypothesisProfileRDFSAugmented-v2_4_15-4Sep2020.rdf`
 
 ==== Header Graphs
 * Named using pattern: `md:PROFILE_ABBREVIATION`
-* Examples:
-** For Equipment profile header: `md:EQ`
-** For Topology profile header: `md:TP`
-* Full internal naming for instance data repository: `md:Model.modelingAuthoritySet | md:Model.scenarioTime | PROFILE_ABBREVIATION | md:Model.mRID`
+** Examples:
+*** For Equipment profile header: `md:EQ`
+*** For Topology profile header: `md:TP`
+* Full internal naming for instance data repository: `md:Model.mRID`
 
 
 === Profile Abbreviation Discovery
@@ -178,15 +173,13 @@ Examples:
 
 === Instance Repository
 * Contains all instance data from CGMES files
-* Graph naming follows the detailed pattern: 
-  `md:Model.modelingAuthoritySet | md:Model.scenarioTime | PROFILE_ABBREVIATION | md:Model.mRID`
+* Graph naming is using the md:Model.mRID
 * Each instance has exactly one header (stored in separate graph in the header repository)
 * Repository enables efficient storage and retrieval of models
 
 === Header Repository
 * Contains header data for each model
-* Graph naming follows the detailed pattern: 
-  `md:Model.modelingAuthoritySet | md:Model.scenarioTime | PROFILE_ABBREVIATION | md:Model.mRID`
+* Graph naming is using the md:Model.mRID
 * Enables quick access to metadata without loading full model data
 
 

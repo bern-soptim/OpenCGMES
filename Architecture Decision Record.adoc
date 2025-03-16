@@ -97,8 +97,7 @@ Implement a structured repository system with:
    * Schema Graphs: `cims:PROFILE_ABBREVIATION`
    * Header Graphs: `md:PROFILE_ABBREVIATION`
 
-3. *Full Internal Naming* for instance data:
-   `md:Model.modelingAuthoritySet | md:Model.scenarioTime | PROFILE_ABBREVIATION | md:Model.mRID`
+3. *Internal Naming* simplified to use only `md:Model.mRID` for both instance and header repositories
 
 === Consequences
 
