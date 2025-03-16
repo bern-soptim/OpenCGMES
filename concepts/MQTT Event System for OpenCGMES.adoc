@@ -1,0 +1,673 @@
+= MQTT Event System for OpenCGMES
+:toc: left
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: highlight.js
+
+== Overview
+
+This document describes the design and implementation of the MQTT Event System for OpenCGMES. The event system provides real-time notifications about changes in repositories, views, branches, and individual graphs, enabling reactive applications and workflows. The system uses the MQTT (Message Queuing Telemetry Transport) protocol for publishing and subscribing to events, leveraging its lightweight nature and publish/subscribe pattern to efficiently distribute notifications across distributed systems.
+
+MQTT is particularly suitable for OpenCGMES because:
+
+1. It provides a decoupled communication model where publishers and subscribers do not need to know about each other
+2. It supports multiple quality of service (QoS) levels for different reliability requirements
+3. It has low overhead, making it efficient for high-frequency events
+4. It offers hierarchical topic structures that align well with the repository/view/branch/graph hierarchy in OpenCGMES
+
+This document outlines the topic structure, event types, payload formats, and integration considerations for implementing the MQTT Event System in OpenCGMES.
+
+== Design Principles
+
+=== Event-Driven Architecture
+
+[plantuml]
+----
+@startuml
+skinparam componentStyle rectangle
+
+package "OpenCGMES" {
+  [Schema Repository] as SchemaRepo
+  [Instance Repository] as InstanceRepo
+  [Header Repository] as HeaderRepo
+  [SHACL Repository] as ShaclRepo
+  [View Manager] as ViewMgr
+  [Branch Manager] as BranchMgr
+  [Event Publisher] as EventPub
+}
+
+[MQTT Broker] as Broker
+
+package "External Systems" {
+  [UI Applications] as UI
+  [Integration Services] as Integration
+  [Monitoring Systems] as Monitoring
+  [Logging Systems] as Logging
+}
+
+SchemaRepo --> EventPub
+InstanceRepo --> EventPub
+HeaderRepo --> EventPub
+ShaclRepo --> EventPub
+ViewMgr --> EventPub
+BranchMgr --> EventPub
+
+EventPub --> Broker
+
+Broker --> UI
+Broker --> Integration
+Broker --> Monitoring
+Broker --> Logging
+
+@enduml
+----
+
+The event system follows these key principles:
+
+1. *Separation of Concerns*: The event publishing mechanism is separate from the core repository logic.
+
+2. *Minimalism*: Events contain minimal but sufficient information, with references to resources rather than complete data.
+
+3. *Consistency*: Event payloads follow a consistent structure across different event types.
+
+4. *Idempotency*: Events are designed to be processed idempotently by subscribers.
+
+5. *Hierarchy*: The topic structure mirrors the natural hierarchy of OpenCGMES components.
+
+=== Topic Structure
+
+The topic structure follows a hierarchical pattern that reflects the organization of data in OpenCGMES:
+
+[source]
+----
+opencgmes/{component_type}/{component_id}/{event_type}
+----
+
+Where:
+
+* `component_type`: The type of component generating the event (repository, view, branch, graph)
+* `component_id`: The identifier for the specific component
+* `event_type`: The specific event that occurred
+
+This structure enables precise subscription patterns, allowing clients to subscribe to:
+
+* All events in the system: `opencgmes/#`
+* All events for a specific component type: `opencgmes/repository/#`
+* All events for a specific component: `opencgmes/repository/instance/#`
+* Specific event types for specific components: `opencgmes/branch/+/merged`
+
+== Event Types
+
+=== Repository Events
+
+Repository events notify about changes to the core repositories in OpenCGMES:
+
+[options="header"]
+|===
+|Topic Pattern |Description |Trigger
+|`opencgmes/repositories/created` |Repository created |When a new repository is initialized
+|`opencgmes/repositories/deleted` |Repository deleted |When a repository is removed from the system
+|`opencgmes/repository/{repo_type}/graph/added` |Graph added to repository |When a new graph is added to a repository
+|`opencgmes/repository/{repo_type}/graph/deleted` |Graph deleted from repository |When a graph is removed from a repository
+|===
+
+Where `{repo_type}` is one of: `schema`, `instance`, `header`, `shacl`
+
+=== View Events
+
+View events notify about changes to dataset views:
+
+[options="header"]
+|===
+|Topic Pattern |Description |Trigger
+|`opencgmes/views/created` |View created |When a new view is created
+|`opencgmes/views/deleted` |View deleted |When a view is removed
+|`opencgmes/view/{view_id}/graph/added` |Graph added to view |When a new graph is added to a view
+|`opencgmes/view/{view_id}/graph/deleted` |Graph deleted from view |When a graph is removed from a view
+|`opencgmes/view/{view_id}/validated` |View validated |When SHACL validation completes for a view
+|===
+
+=== Branch Events
+
+Branch events notify about branch operations in the delta-based editing workflow:
+
+[options="header"]
+|===
+|Topic Pattern |Description |Trigger
+|`opencgmes/branches/created` |Branch created |When a new branch is created
+|`opencgmes/branches/deleted` |Branch deleted |When a branch is deleted
+|`opencgmes/branch/{view_id}/{branch_id}/merged` |Branch merged |When branches are merged
+|`opencgmes/branch/{view_id}/{branch_id}/graph/added` |Graph added to branch |When a new graph is added to a branch
+|`opencgmes/branch/{view_id}/{branch_id}/graph/deleted` |Graph deleted from branch |When a graph is removed from a branch
+|`opencgmes/branch/{view_id}/{branch_id}/validated` |Branch validated |When SHACL validation completes for a branch
+|===
+
+=== Graph Events
+
+Graph events notify about changes to individual graphs:
+
+[options="header"]
+|===
+|Topic Pattern |Description |Trigger
+|`opencgmes/graph/{repo_type}/{graph_id}/updated` |Graph updated |When a graph is modified
+|===
+
+== Event Payload Format
+
+All events use a consistent JSON payload structure:
+
+[source,json]
+----
+{
+  "eventId": "550e8400-e29b-41d4-a716-446655440000",
+  "timestamp": "2025-03-16T14:24:36.123Z",
+  "componentType": "repository|view|branch|graph",
+  "componentId": "identifier-string",
+  "eventType": "created|deleted|updated|added|validated|merged",
+  "details": {
+    // Event-specific details
+  }
+}
+----
+
+The `details` object contains additional event-specific information:
+
+=== Example: Graph Added Event
+
+[source,json]
+----
+{
+  "eventId": "550e8400-e29b-41d4-a716-446655440000",
+  "timestamp": "2025-03-16T14:24:36.123Z",
+  "componentType": "repository",
+  "componentId": "instance",
+  "eventType": "graph/added",
+  "details": {
+    "graphId": "urn:uuid:71d4b744-3b84-40f0-b17f-9a49a82ff18a",
+    "graphType": "cim:EQ",
+    "sourceFile": "grid_model_2025.xml",
+    "tripleCount": 15423
+  }
+}
+----
+
+=== Example: Branch Merged Event
+
+[source,json]
+----
+{
+  "eventId": "550e8400-e29b-41d4-a716-446655440001",
+  "timestamp": "2025-03-16T15:30:22.456Z",
+  "componentType": "branch",
+  "componentId": "feature-x",
+  "eventType": "merged",
+  "details": {
+    "viewId": "grid_model_2025.xml",
+    "sourceBranch": "feature-x",
+    "targetBranch": "main",
+    "conflictsResolved": 3,
+    "changesApplied": 42,
+    "mergeCommitId": "m-12345abc"
+  }
+}
+----
+
+=== Example: Validation Event
+
+[source,json]
+----
+{
+  "eventId": "550e8400-e29b-41d4-a716-446655440003",
+  "timestamp": "2025-03-16T17:22:33.123Z",
+  "componentType": "view",
+  "componentId": "grid_model_2025.xml",
+  "eventType": "validated",
+  "details": {
+    "shaclFiles": ["EQ_452.rdf", "SSH_301.rdf"],
+    "conforms": false,
+    "summary": {
+      "violations": 12,
+      "warnings": 5,
+      "infos": 3
+    },
+    "resultGraphs": ["sh:EQ_452.rdf", "sh:SSH_301.rdf"]
+  }
+}
+----
+
+== Implementation Architecture
+
+=== Event Publication Flow
+
+[plantuml]
+----
+@startuml
+skinparam activityFontSize 14
+skinparam noteFontSize 12
+
+start
+:Repository operation occurs;
+:System captures operation details;
+:Event mapper creates standardized event;
+note right: Follows payload schema
+:Event publisher serializes to JSON;
+:Event is published to MQTT broker;
+stop
+@enduml
+----
+
+=== Integration with Repository Operations
+
+The event system integrates with repository operations through an aspect-oriented approach:
+
+1. *Event Hooks*: Key methods in repositories, view managers, and branch managers are instrumented with event hooks.
+
+2. *Asynchronous Publishing*: Events are published asynchronously to avoid blocking critical operations.
+
+3. *Transaction Boundaries*: Events are published after transaction completion to ensure consistency.
+
+=== Event Subscription Management
+
+Clients can manage event subscriptions through:
+
+1. *Direct MQTT Subscription*: Connecting directly to the MQTT broker using standard MQTT clients.
+
+2. *REST API Subscription Management*: Using the REST API to create and manage subscriptions (which are then translated to MQTT subscriptions server-side).
+
+3. *WebSocket Bridge*: For web clients, a WebSocket bridge can subscribe to MQTT topics and forward events to browser clients.
+
+== Quality of Service Considerations
+
+Different event types require different quality of service (QoS) levels:
+
+[options="header"]
+|===
+|Event Category |Recommended QoS |Rationale
+|Repository structure changes |QoS 2 (exactly once) |Critical changes that must not be missed or duplicated
+|Branch operations |QoS 1 (at least once) |Important operations where processing twice is acceptable but not losing events
+|Graph updates |QoS 0 or 1 |High-frequency events where occasional loss may be acceptable
+|Validation results |QoS 1 |Important but resendable information
+|System metrics |QoS 0 |High-frequency, low-criticality data
+|===
+
+== Broker Configuration and Management
+
+=== Basic Configuration
+
+The MQTT broker should be configured with:
+
+1. *Authentication*: Username/password or certificate-based authentication
+2. *Authorization*: Topic-level access control
+3. *TLS/SSL*: Encrypted connections
+4. *Persistence*: Durable message storage for disconnected clients
+
+=== Topic Access Control
+
+Example access control configuration:
+
+[source]
+----
+# Administrator can access everything
+user admin
+topic readwrite opencgmes/#
+
+# Viewer can only read
+user viewer
+topic read opencgmes/#
+
+# Editor can read all and write to branches
+user editor
+topic read opencgmes/#
+topic write opencgmes/branch/#
+----
+
+=== High Availability
+
+For production environments:
+
+1. *Clustered Brokers*: Multiple broker instances for redundancy
+2. *Load Balancing*: Distribute client connections across broker instances
+3. *Message Persistence*: Ensure messages are not lost during broker restarts
+
+== Additional Event Types
+
+=== Command Events
+
+For fine-grained tracking of editing operations:
+
+[options="header"]
+|===
+|Topic Pattern |Description
+|`opencgmes/command/{view_id}/{branch_id}/executed` |Command executed in branch
+|`opencgmes/command/{view_id}/{branch_id}/undone` |Command undone in branch
+|`opencgmes/command/{view_id}/{branch_id}/redone` |Command redone in branch
+|===
+
+=== Query Events
+
+For monitoring query patterns and performance:
+
+[options="header"]
+|===
+|Topic Pattern |Description
+|`opencgmes/query/{component_type}/{component_id}/executed` |SPARQL query executed
+|`opencgmes/query/{component_type}/{component_id}/performance` |Query performance metrics
+|===
+
+=== Export Events
+
+For tracking export operations:
+
+[options="header"]
+|===
+|Topic Pattern |Description
+|`opencgmes/export/{view_id}/{branch_id}/started` |Export operation started
+|`opencgmes/export/{view_id}/{branch_id}/completed` |Export operation completed
+|`opencgmes/export/{view_id}/{branch_id}/failed` |Export operation failed
+|===
+
+=== System Health Events
+
+For monitoring system health:
+
+[options="header"]
+|===
+|Topic Pattern |Description
+|`opencgmes/system/health` |System health status
+|`opencgmes/system/repository/{repo_type}/memory` |Repository memory usage
+|`opencgmes/system/performance` |System performance metrics
+|===
+
+== Use Cases and Workflows
+
+=== Real-Time UI Updates
+
+[plantuml]
+----
+@startuml
+actor User
+participant "Web UI" as UI
+participant "OpenCGMES Server" as Server
+participant "MQTT Broker" as Broker
+
+User -> UI: Edit transformer parameters
+UI -> Server: Submit edit (REST)
+Server -> Server: Process edit
+Server -> Broker: Publish graph update event
+Broker -> UI: Push event via WebSocket
+UI -> UI: Update visualization
+User <- UI: See updated grid state
+@enduml
+----
+
+This workflow enables real-time updates to the user interface without polling, creating a responsive and efficient user experience.
+
+=== Collaborative Editing
+
+[plantuml]
+----
+@startuml
+actor "User A" as UserA
+actor "User B" as UserB
+participant "UI A" as UIA
+participant "UI B" as UIB
+participant "OpenCGMES Server" as Server
+participant "MQTT Broker" as Broker
+
+UserA -> UIA: Create branch "feature-x"
+UIA -> Server: Create branch (REST)
+Server -> Broker: Publish branch created event
+Broker -> UIB: Push event
+UIB -> UserB: Show notification
+
+UserA -> UIA: Edit entity on "feature-x"
+UIA -> Server: Submit edit (REST)
+Server -> Broker: Publish graph update event
+Broker -> UIB: Push event
+UIB -> UserB: Show activity indicator
+
+UserB -> UIB: Create branch "feature-y" from main
+UIB -> Server: Create branch (REST)
+Server -> Broker: Publish branch created event
+Broker -> UIA: Push event
+UIA -> UserA: Show notification
+
+UserA -> UIA: Merge "feature-x" to main
+UIA -> Server: Merge branch (REST)
+Server -> Broker: Publish branch merged event
+Broker -> UIB: Push event
+UIB -> UserB: Show merge notification
+@enduml
+----
+
+This workflow enables multiple users to work collaboratively on the same model, with real-time awareness of each other's activities.
+
+=== Automated Validation
+
+[plantuml]
+----
+@startuml
+participant "CI/CD System" as CI
+participant "OpenCGMES Server" as Server
+participant "MQTT Broker" as Broker
+participant "Validation Service" as Validator
+
+CI -> Server: Import model (REST)
+Server -> Broker: Publish model imported event
+Broker -> Validator: Push event
+
+Validator -> Server: Run validation (REST)
+Server -> Broker: Publish validation started event
+Broker -> CI: Push event
+
+Server -> Server: Perform validation
+Server -> Broker: Publish validation completed event
+Broker -> CI: Push event
+
+alt Validation Failed
+  CI -> CI: Block deployment
+else Validation Passed
+  CI -> CI: Proceed with deployment
+end
+@enduml
+----
+
+This workflow enables automated CI/CD pipelines that integrate validation of CGMES models as part of the deployment process.
+
+== Restraints and Limitations
+
+* The event system does not transmit complete model data in events, only references and metadata, to avoid excessive network traffic.
+* Graph update events contain only version information and timestamps, not the actual delta changes.
+* High-frequency events may be throttled or batched to prevent overwhelming subscribers.
+* The MQTT broker is considered an external component that must be separately deployed and managed.
+
+== Implementation References
+
+=== Java Implementation with Eclipse Paho
+
+[source,java]
+----
+public class MqttEventPublisher implements EventPublisher {
+    private final MqttClient mqttClient;
+    private final String topicPrefix;
+    private final ObjectMapper objectMapper;
+    
+    public MqttEventPublisher(String brokerUrl, String clientId, String topicPrefix) {
+        this.mqttClient = new MqttClient(brokerUrl, clientId);
+        this.topicPrefix = topicPrefix;
+        this.objectMapper = new ObjectMapper();
+        // Configure connection options
+        MqttConnectOptions options = new MqttConnectOptions();
+        options.setCleanSession(true);
+        options.setAutomaticReconnect(true);
+        this.mqttClient.connect(options);
+    }
+    
+    @Override
+    public void publishEvent(String componentType, String componentId, 
+                            String eventType, Map<String, Object> details) {
+        try {
+            String topic = String.format("%s/%s/%s/%s", 
+                    topicPrefix, componentType, componentId, eventType);
+            
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("eventId", UUID.randomUUID().toString());
+            payload.put("timestamp", OffsetDateTime.now().toString());
+            payload.put("componentType", componentType);
+            payload.put("componentId", componentId);
+            payload.put("eventType", eventType);
+            payload.put("details", details);
+            
+            String message = objectMapper.writeValueAsString(payload);
+            
+            MqttMessage mqttMessage = new MqttMessage(message.getBytes());
+            mqttMessage.setQos(determineQosLevel(componentType, eventType));
+            mqttMessage.setRetained(shouldRetain(componentType, eventType));
+            
+            mqttClient.publish(topic, mqttMessage);
+        } catch (Exception e) {
+            logger.error("Failed to publish event", e);
+        }
+    }
+    
+    private int determineQosLevel(String componentType, String eventType) {
+        // Determine appropriate QoS based on event type
+        if (componentType.equals("repository") && 
+            (eventType.equals("created") || eventType.equals("deleted"))) {
+            return 2; // Exactly once
+        } else if (componentType.equals("branch") && eventType.equals("merged")) {
+            return 1; // At least once
+        } else {
+            return 0; // At most once
+        }
+    }
+    
+    private boolean shouldRetain(String componentType, String eventType) {
+        // Determine if message should be retained
+        return componentType.equals("system") && eventType.equals("health");
+    }
+}
+----
+
+=== Spring Integration Example
+
+[source,java]
+----
+@Configuration
+public class MqttConfig {
+    
+    @Value("${opencgmes.mqtt.broker}")
+    private String broker;
+    
+    @Value("${opencgmes.mqtt.clientId}")
+    private String clientId;
+    
+    @Value("${opencgmes.mqtt.topic.prefix}")
+    private String topicPrefix;
+    
+    @Bean
+    public EventPublisher mqttEventPublisher() {
+        return new MqttEventPublisher(broker, clientId + "-publisher", topicPrefix);
+    }
+    
+    @Bean
+    public ApplicationListener<RepositoryEvent> repositoryEventListener(
+            EventPublisher eventPublisher) {
+        return event -> {
+            Map<String, Object> details = new HashMap<>();
+            // Populate details based on event type
+            
+            eventPublisher.publishEvent(
+                "repository",
+                event.getRepositoryType(),
+                event.getEventType(),
+                details
+            );
+        };
+    }
+    
+    // Additional event listeners...
+}
+----
+
+== Usage Examples
+
+=== Subscribing to Events from Command Line
+
+Using the Mosquitto command-line client:
+
+[source,bash]
+----
+# Subscribe to all repository events
+mosquitto_sub -h localhost -p 1883 -u opencgmes -P password -t "opencgmes/repository/#" -v
+
+# Subscribe to branch merge events
+mosquitto_sub -h localhost -p 1883 -u opencgmes -P password -t "opencgmes/branch/+/+/merged" -v
+
+# Subscribe to all events for a specific model
+mosquitto_sub -h localhost -p 1883 -u opencgmes -P password -t "opencgmes/+/grid_model_2025.xml/#" -v
+----
+
+=== JavaScript Client Example
+
+Using the MQTT.js library:
+
+[source,javascript]
+----
+const mqtt = require('mqtt');
+const client = mqtt.connect('mqtt://localhost:1883', {
+  username: 'opencgmes',
+  password: 'password',
+  clientId: 'ui-client-' + Math.random().toString(16).substr(2, 8)
+});
+
+client.on('connect', function () {
+  // Subscribe to validation events
+  client.subscribe('opencgmes/+/+/validated');
+  
+  // Subscribe to branch events for a specific model
+  client.subscribe('opencgmes/branch/grid_model_2025.xml/#');
+  
+  console.log('Connected to MQTT broker');
+});
+
+client.on('message', function (topic, message) {
+  const event = JSON.parse(message.toString());
+  console.log('Received event:', topic, event);
+  
+  // Handle different event types
+  if (topic.includes('/validated')) {
+    updateValidationStatus(event);
+  } else if (topic.includes('/branch/') && topic.includes('/merged')) {
+    showMergeNotification(event);
+  }
+});
+
+function updateValidationStatus(event) {
+  // Update UI based on validation results
+  if (event.details.conforms) {
+    showSuccess('Validation passed!');
+  } else {
+    showError(`Validation failed with ${event.details.summary.violations} violations`);
+  }
+}
+
+function showMergeNotification(event) {
+  // Show notification about branch merge
+  showNotification(`Branch ${event.details.sourceBranch} was merged into ${event.details.targetBranch}`);
+}
+----
+
+== Conclusion
+
+The MQTT Event System for OpenCGMES provides a flexible, efficient mechanism for real-time notifications about changes in the system. By following a consistent structure for topics and payloads, it enables diverse client applications to selectively subscribe to events of interest. This event-driven architecture facilitates reactive applications, real-time collaboration, and integration with external systems.
+
+When implementing this system, special attention should be paid to:
+
+1. Proper selection of QoS levels based on event criticality
+2. Efficient event payload design to minimize network overhead
+3. Secure configuration of the MQTT broker
+4. Appropriate handling of high-frequency events
+
+With these considerations in mind, the MQTT Event System can become a powerful foundation for building dynamic, collaborative applications on top of OpenCGMES.

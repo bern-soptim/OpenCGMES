@@ -386,3 +386,174 @@ Implement a path-based versioning strategy for all OpenCGMES APIs:
 * Implement API monitoring to track usage by version for deprecation planning
 * Document version differences in OpenAPI/Swagger specifications
 * Consider using feature flags for new capabilities that might eventually span versions
+
+= ADR-011: Event System Architecture for OpenCGMES
+:toc: left
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: highlight.js
+
+== Status
+Accepted
+
+== Context
+OpenCGMES needs a mechanism to notify external systems about changes to repositories, views, branches, and graphs. These notifications are essential for enabling:
+
+1. Real-time UI updates without polling
+2. Multi-user collaborative editing
+3. Integration with external monitoring and validation systems
+4. Event-based automation workflows
+5. Audit and activity tracking
+
+Several approaches could be used to implement this notification system:
+
+1. Webhook callbacks
+2. Long polling
+3. WebSockets
+4. Server-sent events (SSE)
+5. Message queues
+6. Publish/subscribe messaging
+
+Each approach has different characteristics regarding scalability, reliability, ease of implementation, and client compatibility.
+
+== Decision
+Implement an event notification system using MQTT (Message Queuing Telemetry Transport) as the primary transport protocol, with the following architecture:
+
+1. *Protocol*: MQTT 3.1.1 or 5.0
+2. *Broker*: External MQTT broker (e.g., Eclipse Mosquitto)
+3. *Topic Structure*: Hierarchical, reflecting OpenCGMES component structure:
+   ```
+   # For existing resources:
+   opencgmes/{component_type}/{component_id}/{event_type}
+   
+   # For creation/deletion events (using plural component types):
+   opencgmes/{component_types}/created
+   opencgmes/{component_types}/deleted
+   ```
+4. *Event Format*: JSON with standardized structure
+5. *Event Storage*: No persistent event storage within OpenCGMES; rely on broker capabilities
+6. *Client Access*: Direct MQTT connections plus WebSocket bridge for web clients
+
+This decision includes the restraint that OpenCGMES will *not* implement its own MQTT broker but will provide documentation and configuration examples for using external brokers.
+
+== Consequences
+
+=== Positive
+* **Decoupled Architecture**: Publishers and subscribers don't need direct knowledge of each other.
+* **Efficient Protocol**: MQTT is lightweight and designed for constrained environments.
+* **Flexible Subscriptions**: Hierarchical topics allow precise subscription patterns.
+* **Scalability**: MQTT brokers are designed to handle thousands of clients and high message throughput.
+* **QoS Options**: Different quality of service levels can be used for different event types.
+* **Wide Adoption**: Many client libraries and tools exist for different platforms.
+* **Real-time Performance**: Low latency for event delivery.
+
+=== Negative
+* **External Dependency**: Requires deploying and managing an external MQTT broker.
+* **Operational Complexity**: Adds another component to the deployment architecture.
+* **Limited Querying**: No built-in capabilities for historical event querying.
+* **Security Management**: Requires careful configuration of authentication and authorization.
+* **Connection State**: Requires handling reconnections and potential message loss.
+
+=== Implementation Notes
+* Implement a clean abstraction layer to isolate MQTT-specific code.
+* For web clients, provide a WebSocket bridge that subscribes to MQTT topics and forwards events.
+* Consider adding a REST API for subscription management to simplify client integration.
+* Document broker setup and security best practices.
+* Ensure event payloads are self-contained and include all necessary context.
+* Implement QoS selection based on event criticality.
+
+== Implementation Architecture
+
+The event system consists of several components:
+
+1. *Event Publishers*: Components that capture system events and publish them to the MQTT broker.
+2. *Event Broker*: External MQTT broker that routes messages from publishers to subscribers.
+3. *Event Subscribers*: External systems that subscribe to events of interest.
+4. *WebSocket Bridge*: Optional component to support web clients.
+
+[plantuml]
+----
+@startuml
+skinparam componentStyle rectangle
+
+package "OpenCGMES" {
+  [Event Abstraction Layer] as EventLayer
+  [MQTT Publisher] as Publisher
+  [WebSocket Bridge] as WsBridge
+  [Repository Manager] as RepoMgr
+  [View Manager] as ViewMgr
+  [Branch Manager] as BranchMgr
+}
+
+[MQTT Broker] as Broker
+
+package "Clients" {
+  [MQTT Clients] as MqttClients
+  [WebSocket Clients] as WsClients
+  [REST Clients] as RestClients
+}
+
+RepoMgr --> EventLayer
+ViewMgr --> EventLayer
+BranchMgr --> EventLayer
+
+EventLayer --> Publisher
+Publisher --> Broker
+Publisher --> WsBridge
+WsBridge --> WsClients
+
+Broker --> MqttClients
+RestClients --> EventLayer : subscription management
+
+@enduml
+----
+
+=== Event Categories
+
+Events are categorized as follows:
+
+1. *Repository Events*: Changes to repositories
+   - Repository created/deleted
+   - Graph added/deleted
+
+2. *View Events*: Changes to views
+   - View created/deleted
+   - Graph added/deleted
+   - View validated
+
+3. *Branch Events*: Changes to branches
+   - Branch created/deleted/merged
+   - Graph added/deleted
+   - Branch validated
+
+4. *Graph Events*: Changes to graph content
+   - Graph updated
+
+5. *System Events*: System-wide events
+   - Health status
+   - Resource usage
+
+== Alternative Approaches Considered
+
+=== WebHooks
+* **Pros**: Simple HTTP-based integration, familiar to many developers
+* **Cons**: Requires client to expose HTTP endpoints, stateless, can't push to browsers directly
+
+=== WebSockets
+* **Pros**: Full-duplex communication, well-supported in browsers
+* **Cons**: Higher resource usage for maintaining connections, less suitable for IoT/lightweight clients
+
+=== Server-Sent Events (SSE)
+* **Pros**: Simple client implementation, works with standard HTTP
+* **Cons**: One-way communication, potential issues with proxies and firewalls
+
+=== Message Queues (e.g., RabbitMQ, ActiveMQ)
+* **Pros**: Robust delivery guarantees, complex routing capabilities
+* **Cons**: Heavier protocol overhead, potentially more complex client implementations
+
+== Future Considerations
+
+1. *Correlation IDs*: Add support for tracking related events across system components.
+2. *Event Schemas*: Define formal schemas for event payloads to ensure compatibility.
+3. *Metrics and Monitoring*: Add instrumentation for event system performance.

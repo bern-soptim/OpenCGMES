@@ -1,0 +1,106 @@
+# Setting up Mosquitto for OpenCGMES
+
+This guide explains how to set up and configure Eclipse Mosquitto MQTT broker for use with OpenCGMES.
+
+## Installation
+
+### Ubuntu/Debian
+```bash
+sudo apt update
+sudo apt install mosquitto mosquitto-clients
+```
+
+### CentOS/RHEL
+```bash
+sudo yum install mosquitto mosquitto-clients
+```
+
+### Windows
+Download the installer from [mosquitto.org](https://mosquitto.org/download/) and follow the installation instructions.
+
+### Docker
+```bash
+docker run -it -p 1883:1883 -p 9001:9001 eclipse-mosquitto
+```
+
+## Basic Configuration
+
+Create a configuration file at `/etc/mosquitto/conf.d/opencgmes.conf` (Linux) or `C:\Program Files\mosquitto\opencgmes.conf` (Windows):
+
+```
+# Basic MQTT configuration for OpenCGMES
+listener 1883
+allow_anonymous false
+
+# Create a password file
+password_file /etc/mosquitto/passwd
+
+# Enable persistence
+persistence true
+persistence_location /var/lib/mosquitto/
+
+# Logging
+log_dest file /var/log/mosquitto/mosquitto.log
+log_type all
+```
+
+## Adding Users
+
+Create a user for OpenCGMES:
+
+```bash
+sudo mosquitto_passwd -c /etc/mosquitto/passwd opencgmes
+```
+
+Enter a strong password when prompted.
+
+## Configuring OpenCGMES for MQTT
+
+Add the following properties to your OpenCGMES configuration file:
+
+```properties
+# MQTT Configuration
+opencgmes.mqtt.enabled=true
+opencgmes.mqtt.broker=tcp://localhost:1883
+opencgmes.mqtt.clientId=opencgmes-server
+opencgmes.mqtt.username=opencgmes
+opencgmes.mqtt.password=your_password_here
+opencgmes.mqtt.qos=1
+opencgmes.mqtt.topic.prefix=opencgmes
+```
+
+## Testing the Connection
+
+You can use the mosquitto_sub client to test subscription to OpenCGMES events:
+
+```bash
+mosquitto_sub -h localhost -p 1883 -u opencgmes -P your_password -t "opencgmes/#" -v
+```
+
+This will display all events published by OpenCGMES.
+
+## Security Recommendations
+
+For production environments:
+
+1. Enable TLS/SSL:
+   ```
+   listener 8883
+   cafile /etc/mosquitto/ca_certificates/ca.crt
+   certfile /etc/mosquitto/certs/server.crt
+   keyfile /etc/mosquitto/certs/server.key
+   ```
+
+2. Use ACLs to restrict access:
+   ```
+   acl_file /etc/mosquitto/acl
+   ```
+
+   Example ACL file:
+   ```
+   user opencgmes
+   topic read opencgmes/#
+   topic write opencgmes/#
+   ```
+
+3. Consider using a load balancer for high-availability setups

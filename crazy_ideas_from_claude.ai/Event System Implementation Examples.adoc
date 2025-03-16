@@ -1,0 +1,1761 @@
+= Event System Implementation Examples for OpenCGMES
+:toc: left
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: highlight.js
+
+== Overview
+
+This document provides practical implementation examples of the event system for OpenCGMES, focusing on concrete code examples and usage patterns. These examples are meant to complement the conceptual documentation and architecture decision record by showing how the event system can be implemented and used in practice.
+
+== Event Publisher Implementation
+
+=== Core Event Publisher Interface
+
+[source,java]
+----
+package org.opencgmes.event;
+
+import java.util.Map;
+
+/**
+ * Interface for publishing events to the event system.
+ */
+public interface EventPublisher {
+    
+    /**
+     * Publishes an event to the event system.
+     *
+     * @param componentType The type of component generating the event (repository, view, branch, graph)
+     * @param componentId The identifier for the specific component
+     * @param eventType The specific event that occurred
+     * @param details Additional event-specific details
+     */
+    void publishEvent(String componentType, String componentId, 
+                     String eventType, Map<String, Object> details);
+    
+    /**
+     * Publishes an event with a specific QoS level.
+     *
+     * @param componentType The type of component generating the event
+     * @param componentId The identifier for the specific component
+     * @param eventType The specific event that occurred
+     * @param details Additional event-specific details
+     * @param qos Quality of Service level (0, 1, or 2)
+     */
+    void publishEvent(String componentType, String componentId, 
+                     String eventType, Map<String, Object> details, int qos);
+                     
+    /**
+     * Closes the publisher and releases resources.
+     */
+    void close();
+}
+----
+
+=== MQTT Implementation
+
+[source,java]
+----
+package org.opencgmes.event.mqtt;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.eclipse.paho.client.mqttv3.*;
+import org.opencgmes.event.EventPublisher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.OffsetDateTime;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class MqttEventPublisher implements EventPublisher {
+    private static final Logger logger = LoggerFactory.getLogger(MqttEventPublisher.class);
+    
+    private final MqttClient mqttClient;
+    private final String topicPrefix;
+    private final ObjectMapper objectMapper;
+    private final ExecutorService executorService;
+    
+    public MqttEventPublisher(String brokerUrl, String clientId, String topicPrefix) throws MqttException {
+        this.mqttClient = new MqttClient(brokerUrl, clientId);
+        this.topicPrefix = topicPrefix;
+        this.objectMapper = new ObjectMapper();
+        this.executorService = Executors.newCachedThreadPool();
+        
+        MqttConnectOptions options = new MqttConnectOptions();
+        options.setCleanSession(true);
+        options.setAutomaticReconnect(true);
+        options.setConnectionTimeout(10);
+        options.setKeepAliveInterval(60);
+        
+        this.mqttClient.setCallback(new MqttCallbackExtended() {
+            @Override
+            public void connectComplete(boolean reconnect, String serverURI) {
+                logger.info("Connected to MQTT broker at {}", serverURI);
+            }
+            
+            @Override
+            public void connectionLost(Throwable cause) {
+                logger.warn("Connection to MQTT broker lost", cause);
+            }
+            
+            @Override
+            public void messageArrived(String topic, MqttMessage message) {
+                // Not used for publisher
+            }
+            
+            @Override
+            public void deliveryComplete(IMqttDeliveryToken token) {
+                // Optional tracking of message delivery
+            }
+        });
+        
+        this.mqttClient.connect(options);
+        logger.info("MQTT Event Publisher initialized with prefix: {}", topicPrefix);
+    }
+    
+    @Override
+    public void publishEvent(String componentType, String componentId, 
+                           String eventType, Map<String, Object> details) {
+        // Use default QoS based on event type
+        int qos = determineQosLevel(componentType, eventType);
+        publishEvent(componentType, componentId, eventType, details, qos);
+    }
+    
+    @Override
+    public void publishEvent(String componentType, String componentId, 
+                           String eventType, Map<String, Object> details, int qos) {
+        // Execute asynchronously to avoid blocking caller
+        executorService.submit(() -> {
+            try {
+                String topic = String.format("%s/%s/%s/%s", 
+                        topicPrefix, componentType, componentId, eventType);
+                
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("eventId", UUID.randomUUID().toString());
+                payload.put("timestamp", OffsetDateTime.now().toString());
+                payload.put("componentType", componentType);
+                payload.put("componentId", componentId);
+                payload.put("eventType", eventType);
+                payload.put("details", details);
+                
+                String message = objectMapper.writeValueAsString(payload);
+                
+                MqttMessage mqttMessage = new MqttMessage(message.getBytes());
+                mqttMessage.setQos(qos);
+                mqttMessage.setRetained(shouldRetain(componentType, eventType));
+                
+                mqttClient.publish(topic, mqttMessage);
+                
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Published event: {} (QoS: {})", topic, qos);
+                }
+            } catch (Exception e) {
+                logger.error("Failed to publish event", e);
+            }
+        });
+    }
+    
+    @Override
+    public void close() {
+        try {
+            executorService.shutdown();
+            if (mqttClient.isConnected()) {
+                mqttClient.disconnect();
+            }
+            mqttClient.close();
+            logger.info("MQTT Event Publisher closed");
+        } catch (MqttException e) {
+            logger.error("Error closing MQTT client", e);
+        }
+    }
+    
+    private int determineQosLevel(String componentType, String eventType) {
+        // Repository structure changes use QoS 2 (exactly once)
+        if (componentType.equals("repository") && 
+            (eventType.equals("created") || eventType.equals("deleted"))) {
+            return 2;
+        }
+        
+        // Branch operations use QoS 1 (at least once)
+        if (componentType.equals("branch") && 
+            (eventType.equals("merged") || eventType.equals("created") || eventType.equals("deleted"))) {
+            return 1;
+        }
+        
+        // Validation results use QoS 1
+        if (eventType.equals("validated")) {
+            return 1;
+        }
+        
+        // All other events use QoS 0 (at most once)
+        return 0;
+    }
+    
+    private boolean shouldRetain(String componentType, String eventType) {
+        // System health status should be retained
+        if (componentType.equals("system") && eventType.equals("health")) {
+            return true;
+        }
+        
+        // Repository structure information might be useful to retain
+        if (componentType.equals("repository") && 
+            (eventType.equals("created") || eventType.equals("deleted"))) {
+            return true;
+        }
+        
+        // Other messages are not retained
+        return false;
+    }
+}
+----
+
+=== Spring Boot Integration
+
+[source,java]
+----
+package org.opencgmes.config;
+
+import org.eclipse.paho.client.mqttv3.MqttException;
+import org.opencgmes.event.EventPublisher;
+import org.opencgmes.event.mqtt.MqttEventPublisher;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class EventConfig {
+    
+    @Value("${opencgmes.mqtt.enabled:true}")
+    private boolean mqttEnabled;
+    
+    @Value("${opencgmes.mqtt.broker:tcp://localhost:1883}")
+    private String mqttBroker;
+    
+    @Value("${opencgmes.mqtt.clientId:opencgmes-server}")
+    private String mqttClientId;
+    
+    @Value("${opencgmes.mqtt.username:}")
+    private String mqttUsername;
+    
+    @Value("${opencgmes.mqtt.password:}")
+    private String mqttPassword;
+    
+    @Value("${opencgmes.mqtt.topic.prefix:opencgmes}")
+    private String mqttTopicPrefix;
+    
+    @Bean
+    public EventPublisher eventPublisher() throws MqttException {
+        if (!mqttEnabled) {
+            return new NoOpEventPublisher();
+        }
+        
+        // Add unique identifier to client ID to avoid conflicts
+        String uniqueClientId = mqttClientId + "-" + System.currentTimeMillis();
+        
+        return new MqttEventPublisher(mqttBroker, uniqueClientId, mqttTopicPrefix);
+    }
+}
+----
+
+== Event Listeners and Hooks
+
+=== Repository Event Listeners
+
+[source,java]
+----
+package org.opencgmes.repository;
+
+import org.opencgmes.event.EventPublisher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@Component
+public class RepositoryEventHandler {
+    private static final Logger logger = LoggerFactory.getLogger(RepositoryEventHandler.class);
+    
+    private final EventPublisher eventPublisher;
+    
+    public RepositoryEventHandler(EventPublisher eventPublisher) {
+        this.eventPublisher = eventPublisher;
+    }
+    
+    public void handleRepositoryCreated(String repositoryType, String name, String description) {
+        logger.debug("Repository created: {}", repositoryType);
+        
+        Map<String, Object> details = new HashMap<>();
+        details.put("repositoryType", repositoryType);
+        details.put("name", name);
+        details.put("description", description);
+        
+        eventPublisher.publishEvent("repositories", "global", "created", details);
+    }
+
+    public void handleRepositoryDeleted(String repositoryType) {
+        logger.debug("Repository deleted: {}", repositoryType);
+        
+        Map<String, Object> details = new HashMap<>();
+        details.put("repositoryType", repositoryType);
+        
+        eventPublisher.publishEvent("repositories", "global", "deleted", details);
+    }
+
+    public void handleGraphAdded(String repositoryType, String graphId, String graphType, String sourceFile) {
+        logger.debug("Graph added to {}: {}", repositoryType, graphId);
+        
+        Map<String, Object> details = new HashMap<>();
+        details.put("graphId", graphId);
+        details.put("graphType", graphType);
+        details.put("sourceFile", sourceFile);
+        
+        eventPublisher.publishEvent("repository", repositoryType, "graph/added", details);
+    }
+    
+    public void handleGraphDeleted(String repositoryType, String graphId) {
+        logger.debug("Graph deleted from {}: {}", repositoryType, graphId);
+        
+        Map<String, Object> details = new HashMap<>();
+        details.put("graphId", graphId);
+        
+        eventPublisher.publishEvent("repository", repositoryType, "graph/deleted", details);
+    }
+    
+    // Additional event handlers...
+}
+----
+
+=== View Event Listeners
+
+[source,java]
+----
+package org.opencgmes.view;
+
+import org.opencgmes.event.EventPublisher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@Component
+public class ViewEventHandler {
+    private static final Logger logger = LoggerFactory.getLogger(ViewEventHandler.class);
+    
+    private final EventPublisher eventPublisher;
+    
+    public ViewEventHandler(EventPublisher eventPublisher) {
+        this.eventPublisher = eventPublisher;
+    }
+    
+    public void handleViewCreated(String viewId, String sourceFile, List<String> profiles) {
+        logger.debug("View created: {}", viewId);
+        
+        Map<String, Object> details = new HashMap<>();
+        details.put("viewId", viewId);
+        details.put("sourceFile", sourceFile);
+        details.put("profiles", profiles);
+        details.put("importTimestamp", OffsetDateTime.now().toString());
+        
+        eventPublisher.publishEvent("views", "global", "created", details);
+    }
+    
+    public void handleViewDeleted(String viewId) {
+        logger.debug("View deleted: {}", viewId);
+        
+        Map<String, Object> details = new HashMap<>();
+        details.put("viewId", viewId);
+        
+        eventPublisher.publishEvent("views", "global", "deleted", details);
+    }
+    
+    public void handleViewValidated(String viewId, boolean conforms, Map<String, Integer> summary) {
+        logger.debug("View validated: {}, conforms: {}", viewId, conforms);
+        
+        Map<String, Object> details = new HashMap<>();
+        details.put("conforms", conforms);
+        details.put("summary", summary);
+        
+        eventPublisher.publishEvent("view", viewId, "validated", details);
+    }
+    
+    // Additional event handlers...
+}
+----
+
+=== Branch Event Listeners
+
+[source,java]
+----
+package org.opencgmes.branch;
+
+import org.opencgmes.event.EventPublisher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@Component
+public class BranchEventHandler {
+    private static final Logger logger = LoggerFactory.getLogger(BranchEventHandler.class);
+    
+    private final EventPublisher eventPublisher;
+    
+    public BranchEventHandler(EventPublisher eventPublisher) {
+        this.eventPublisher = eventPublisher;
+    }
+    
+    public void handleBranchCreated(String viewId, String branchId, String parentBranch, String creator) {
+        logger.debug("Branch created: {} in view {}", branchId, viewId);
+        
+        Map<String, Object> details = new HashMap<>();
+        details.put("viewId", viewId);
+        details.put("branchId", branchId);
+        details.put("parentBranch", parentBranch);
+        details.put("creator", creator);
+        
+        eventPublisher.publishEvent("branches", "global", "created", details);
+    }
+    
+    public void handleBranchDeleted(String viewId, String branchId) {
+        logger.debug("Branch deleted: {} in view {}", branchId, viewId);
+        
+        Map<String, Object> details = new HashMap<>();
+        details.put("viewId", viewId);
+        details.put("branchId", branchId);
+        
+        eventPublisher.publishEvent("branches", "global", "deleted", details);
+    }
+    
+    public void handleBranchMerged(String viewId, String sourceBranch, String targetBranch, 
+                                 int changesApplied, int conflictsResolved) {
+        logger.debug("Branch merged: {} into {} in view {}", sourceBranch, targetBranch, viewId);
+        
+        Map<String, Object> details = new HashMap<>();
+        details.put("viewId", viewId);
+        details.put("sourceBranch", sourceBranch);
+        details.put("targetBranch", targetBranch);
+        details.put("changesApplied", changesApplied);
+        details.put("conflictsResolved", conflictsResolved);
+        
+        eventPublisher.publishEvent("branch", viewId + "/" + sourceBranch, "merged", details);
+    }
+    
+    // Additional event handlers...
+}
+----
+
+=== Integration with Repository Implementation
+
+[source,java]
+----
+package org.opencgmes.repository.impl;
+
+import org.apache.jena.rdf.model.Model;
+import org.opencgmes.repository.GraphRepository;
+import org.opencgmes.repository.RepositoryEventHandler;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Repository;
+
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+@Repository
+public class JenaGraphRepository implements GraphRepository {
+    private static final Logger logger = LoggerFactory.getLogger(JenaGraphRepository.class);
+    
+    private final ConcurrentHashMap<String, Model> graphs = new ConcurrentHashMap<>();
+    private final RepositoryEventHandler eventHandler;
+    private final String repositoryType;
+    
+    public JenaGraphRepository(RepositoryEventHandler eventHandler, String repositoryType) {
+        this.eventHandler = eventHandler;
+        this.repositoryType = repositoryType;
+    }
+    
+    @Override
+    public void addGraph(String graphId, Model model, String graphType, String sourceFile) {
+        graphs.put(graphId, model);
+        logger.debug("Added graph {} to repository {}", graphId, repositoryType);
+        
+        // Publish event
+        eventHandler.handleGraphAdded(repositoryType, graphId, graphType, sourceFile);
+    }
+    
+    @Override
+    public void removeGraph(String graphId) {
+        graphs.remove(graphId);
+        logger.debug("Removed graph {} from repository {}", graphId, repositoryType);
+        
+        // Publish event
+        eventHandler.handleGraphDeleted(repositoryType, graphId);
+    }
+    
+    @Override
+    public Set<String> getGraphIds() {
+        return graphs.keySet();
+    }
+    
+    @Override
+    public Model getGraph(String graphId) {
+        return graphs.get(graphId);
+    }
+    
+    // Additional repository methods...
+}
+----
+
+== Subscriber Implementations
+
+=== Java Client Example
+
+[source,java]
+----
+package org.opencgmes.client;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.eclipse.paho.client.mqttv3.*;
+
+import java.util.UUID;
+import java.util.function.Consumer;
+
+public class MqttEventSubscriber implements AutoCloseable {
+    private final MqttClient mqttClient;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    
+    public MqttEventSubscriber(String brokerUrl, String username, String password) throws MqttException {
+        String clientId = "opencgmes-client-" + UUID.randomUUID().toString();
+        this.mqttClient = new MqttClient(brokerUrl, clientId);
+        
+        MqttConnectOptions options = new MqttConnectOptions();
+        options.setCleanSession(true);
+        options.setAutomaticReconnect(true);
+        
+        if (username != null && !username.isEmpty()) {
+            options.setUserName(username);
+            options.setPassword(password.toCharArray());
+        }
+        
+        this.mqttClient.connect(options);
+        System.out.println("Connected to MQTT broker at " + brokerUrl);
+    }
+    
+    public void subscribeToRepositoryCreationEvents(Consumer<Map<String, Object>> eventHandler) 
+            throws MqttException {
+        String topic = "opencgmes/repositories/created";
+        subscribe(topic, eventHandler);
+    }
+
+    public void subscribeToRepositoryDeletionEvents(Consumer<Map<String, Object>> eventHandler) 
+            throws MqttException {
+        String topic = "opencgmes/repositories/deleted";
+        subscribe(topic, eventHandler);
+    }
+    
+    public void subscribeToRepositoryEvents(String repositoryType, Consumer<Map<String, Object>> eventHandler) 
+            throws MqttException {
+        String topic = "opencgmes/repository/" + repositoryType + "/#";
+        subscribe(topic, eventHandler);
+    }
+    
+    public void subscribeToViewCreationEvents(Consumer<Map<String, Object>> eventHandler) 
+            throws MqttException {
+        String topic = "opencgmes/views/created";
+        subscribe(topic, eventHandler);
+    }
+
+    public void subscribeToViewDeletionEvents(Consumer<Map<String, Object>> eventHandler) 
+            throws MqttException {
+        String topic = "opencgmes/views/deleted";
+        subscribe(topic, eventHandler);
+    }
+    
+    public void subscribeToViewEvents(String viewId, Consumer<Map<String, Object>> eventHandler) 
+            throws MqttException {
+        String topic = "opencgmes/view/" + viewId + "/#";
+        subscribe(topic, eventHandler);
+    }
+    
+    public void subscribeToBranchCreationEvents(Consumer<Map<String, Object>> eventHandler) 
+            throws MqttException {
+        String topic = "opencgmes/branches/created";
+        subscribe(topic, eventHandler);
+    }
+
+    public void subscribeToBranchDeletionEvents(Consumer<Map<String, Object>> eventHandler) 
+            throws MqttException {
+        String topic = "opencgmes/branches/deleted";
+        subscribe(topic, eventHandler);
+    }
+    
+    public void subscribeToBranchEvents(String viewId, String branchId, Consumer<Map<String, Object>> eventHandler) 
+            throws MqttException {
+        String topic = "opencgmes/branch/" + viewId + "/" + branchId + "/#";
+        subscribe(topic, eventHandler);
+    }
+    
+    public void subscribeToGraphUpdates(String repositoryType, String graphId, Consumer<Map<String, Object>> eventHandler) 
+            throws MqttException {
+        String topic = "opencgmes/graph/" + repositoryType + "/" + graphId + "/updated";
+        subscribe(topic, eventHandler);
+    }
+    
+    public void subscribeToAllEvents(Consumer<Map<String, Object>> eventHandler) 
+            throws MqttException {
+        subscribe("opencgmes/#", eventHandler);
+    }
+    
+    private void subscribe(String topic, Consumer<Map<String, Object>> eventHandler) throws MqttException {
+        mqttClient.subscribe(topic, (t, message) -> {
+            try {
+                String payload = new String(message.getPayload());
+                Map<String, Object> event = objectMapper.readValue(payload, Map.class);
+                eventHandler.accept(event);
+            } catch (Exception e) {
+                System.err.println("Error processing message on topic " + t + ": " + e.getMessage());
+            }
+        });
+        System.out.println("Subscribed to topic: " + topic);
+    }
+    
+    @Override
+    public void close() throws Exception {
+        if (mqttClient.isConnected()) {
+            mqttClient.disconnect();
+        }
+        mqttClient.close();
+        System.out.println("Disconnected from MQTT broker");
+    }
+    
+    public static void main(String[] args) {
+        try {
+            String brokerUrl = "tcp://localhost:1883";
+            String username = "opencgmes";
+            String password = "password";
+            
+            try (MqttEventSubscriber subscriber = new MqttEventSubscriber(brokerUrl, username, password)) {
+                // Subscribe to all branch merge events
+                subscriber.subscribe("opencgmes/branch/+/+/merged", event -> {
+                    System.out.println("Branch merged: " + event);
+                    
+                    Map<String, Object> details = (Map<String, Object>) event.get("details");
+                    String sourceBranch = (String) details.get("sourceBranch");
+                    String targetBranch = (String) details.get("targetBranch");
+                    
+                    System.out.println("Merged " + sourceBranch + " into " + targetBranch);
+                });
+                
+                // Keep the application running
+                System.out.println("Listening for events. Press Enter to exit.");
+                System.in.read();
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+----
+
+=== JavaScript Client Example
+
+[source,javascript]
+----
+// Browser-based client using MQTT.js over WebSockets
+
+import * as mqtt from 'mqtt';
+
+class OpenCGMESEventClient {
+  constructor(brokerUrl, options = {}) {
+    this.clientId = `opencgmes-web-${Math.random().toString(16).substring(2, 10)}`;
+    
+    const defaultOptions = {
+      clientId: this.clientId,
+      clean: true,
+      reconnectPeriod: 3000,
+      connectTimeout: 30000
+    };
+    
+    this.client = mqtt.connect(brokerUrl, { ...defaultOptions, ...options });
+    this.handlers = new Map();
+    
+    this.client.on('connect', () => {
+      console.log('Connected to MQTT broker');
+      this._resubscribe();
+    });
+    
+    this.client.on('message', (topic, message) => {
+      try {
+        const event = JSON.parse(message.toString());
+        console.debug('Received event:', topic, event);
+        
+        // Call all handlers that match this topic
+        this.handlers.forEach((handler, pattern) => {
+          if (this._topicMatches(topic, pattern)) {
+            handler(event, topic);
+          }
+        });
+      } catch (err) {
+        console.error('Error processing message:', err);
+      }
+    });
+    
+    this.client.on('error', (err) => {
+      console.error('MQTT client error:', err);
+    });
+    
+    this.client.on('offline', () => {
+      console.warn('MQTT client offline');
+    });
+  }
+  
+  subscribeToRepositoryCreationEvents(handler) {
+    const topic = 'opencgmes/repositories/created';
+    return this.subscribe(topic, handler);
+  }
+
+  subscribeToRepositoryDeletionEvents(handler) {
+    const topic = 'opencgmes/repositories/deleted';
+    return this.subscribe(topic, handler);
+  }
+  
+  subscribeToRepositoryEvents(repositoryType, handler) {
+    const topic = `opencgmes/repository/${repositoryType}/#`;
+    return this.subscribe(topic, handler);
+  }
+  
+  subscribeToViewCreationEvents(handler) {
+    const topic = 'opencgmes/views/created';
+    return this.subscribe(topic, handler);
+  }
+
+  subscribeToViewDeletionEvents(handler) {
+    const topic = 'opencgmes/views/deleted';
+    return this.subscribe(topic, handler);
+  }
+  
+  subscribeToViewEvents(viewId, handler) {
+    const topic = `opencgmes/view/${viewId}/#`;
+    return this.subscribe(topic, handler);
+  }
+  
+  subscribeToBranchCreationEvents(handler) {
+    const topic = 'opencgmes/branches/created';
+    return this.subscribe(topic, handler);
+  }
+
+  subscribeToBranchDeletionEvents(handler) {
+    const topic = 'opencgmes/branches/deleted';
+    return this.subscribe(topic, handler);
+  }
+  
+  subscribeToBranchEvents(viewId, branchId, handler) {
+    const topic = `opencgmes/branch/${viewId}/${branchId}/#`;
+    return this.subscribe(topic, handler);
+  }
+  
+  subscribeToValidationEvents(handler) {
+    const topic = 'opencgmes/+/+/validated';
+    return this.subscribe(topic, handler);
+  }
+  
+  subscribeToGraphUpdates(repositoryType, graphId, handler) {
+    const topic = `opencgmes/graph/${repositoryType}/${graphId}/updated`;
+    return this.subscribe(topic, handler);
+  }
+  
+  subscribe(topic, handler) {
+    const handlerId = `${topic}-${Date.now()}`;
+    
+    this.handlers.set(topic, handler);
+    this.client.subscribe(topic, (err) => {
+      if (err) {
+        console.error(`Error subscribing to ${topic}:`, err);
+      } else {
+        console.log(`Subscribed to ${topic}`);
+      }
+    });
+    
+    return handlerId;
+  }
+  
+  unsubscribe(handlerId) {
+    const [topic] = handlerId.split('-');
+    
+    if (this.handlers.has(topic)) {
+      this.handlers.delete(topic);
+      
+      // Only unsubscribe if no other handlers are using this topic
+      let shouldUnsubscribe = true;
+      this.handlers.forEach((_, pattern) => {
+        if (pattern === topic) {
+          shouldUnsubscribe = false;
+        }
+      });
+      
+      if (shouldUnsubscribe) {
+        this.client.unsubscribe(topic);
+        console.log(`Unsubscribed from ${topic}`);
+      }
+    }
+  }
+  
+  disconnect() {
+    if (this.client.connected) {
+      this.client.end();
+      console.log('Disconnected from MQTT broker');
+    }
+  }
+  
+  _resubscribe() {
+    // Resubscribe to all topics after reconnect
+    const topics = [...this.handlers.keys()];
+    
+    topics.forEach(topic => {
+      this.client.subscribe(topic, (err) => {
+        if (err) {
+          console.error(`Error resubscribing to ${topic}:`, err);
+        } else {
+          console.log(`Resubscribed to ${topic}`);
+        }
+      });
+    });
+  }
+  
+  _topicMatches(actualTopic, patternTopic) {
+    // Simple topic matching that handles wildcards
+    const patternParts = patternTopic.split('/');
+    const actualParts = actualTopic.split('/');
+    
+    if (patternParts.length > actualParts.length) {
+      return false;
+    }
+    
+    for (let i = 0; i < patternParts.length; i++) {
+      if (patternParts[i] === '#') {
+        return true;
+      }
+      
+      if (patternParts[i] !== '+' && patternParts[i] !== actualParts[i]) {
+        return false;
+      }
+    }
+    
+    return patternParts.length === actualParts.length;
+  }
+}
+
+// Usage example
+const client = new OpenCGMESEventClient('ws://localhost:9001', {
+  username: 'opencgmes',
+  password: 'password'
+});
+
+// Subscribe to branch merge events
+client.subscribe('opencgmes/branch/+/+/merged', (event) => {
+  const details = event.details;
+  console.log(`Branch ${details.sourceBranch} merged into ${details.targetBranch}`);
+  
+  // Update UI to reflect the merge
+  updateBranchTree();
+});
+
+// Subscribe to validation events
+client.subscribeToValidationEvents((event) => {
+  const details = event.details;
+  
+  if (details.conforms) {
+    showSuccessNotification('Validation passed!');
+  } else {
+    showErrorNotification(`Validation failed with ${details.summary.violations} violations`);
+    
+    // Update validation status display
+    updateValidationStatus(details.summary);
+  }
+});
+
+// Clean up on page unload
+window.addEventListener('beforeunload', () => {
+  client.disconnect();
+});
+----
+
+=== Command Line Monitor
+
+[source,bash]
+----
+#!/bin/bash
+# opencgmes-monitor.sh - Simple event monitor for OpenCGMES
+
+# Default values
+BROKER="localhost"
+PORT="1883"
+USERNAME=""
+PASSWORD=""
+TOPIC="opencgmes/#"
+
+# Parse command line arguments
+while getopts "b:p:u:P:t:h" opt; do
+  case $opt in
+    b) BROKER="$OPTARG" ;;
+    p) PORT="$OPTARG" ;;
+    u) USERNAME="$OPTARG" ;;
+    P) PASSWORD="$OPTARG" ;;
+    t) TOPIC="$OPTARG" ;;
+    h)
+      echo "Usage: $0 [-b broker] [-p port] [-u username] [-P password] [-t topic]"
+      echo
+      echo "Options:"
+      echo "  -b  MQTT broker hostname (default: localhost)"
+      echo "  -p  MQTT broker port (default: 1883)"
+      echo "  -u  Username for authentication"
+      echo "  -P  Password for authentication"
+      echo "  -t  Topic to subscribe to (default: opencgmes/#)"
+      echo "  -h  Show this help message"
+      exit 0
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Check if mosquitto_sub is installed
+if ! command -v mosquitto_sub &> /dev/null; then
+  echo "Error: mosquitto_sub not found. Please install mosquitto-clients package."
+  exit 1
+fi
+
+# Build command with or without authentication
+CMD="mosquitto_sub -h $BROKER -p $PORT -t \"$TOPIC\" -v"
+
+if [ -n "$USERNAME" ]; then
+  CMD="$CMD -u $USERNAME -P $PASSWORD"
+fi
+
+# Add JSON formatting if jq is available
+if command -v jq &> /dev/null; then
+  echo "Using jq for JSON formatting"
+  PRETTY_PRINT="| while read -r topic message; do echo \"\$topic\"; echo \"\$message\" | jq .; echo; done"
+  CMD="$CMD $PRETTY_PRINT"
+fi
+
+echo "Monitoring OpenCGMES events from $BROKER:$PORT on topic $TOPIC"
+echo "Press Ctrl+C to exit"
+echo
+
+# Execute the command
+eval $CMD
+----
+
+== WebSocket Bridge
+
+=== Server Implementation
+
+[source,java]
+----
+package org.opencgmes.websocket;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.eclipse.paho.client.mqttv3.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+import org.springframework.web.socket.CloseStatus;
+import org.springframework.web.socket.TextMessage;
+import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.handler.TextWebSocketHandler;
+
+import java.io.IOException;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+@Component
+public class EventWebSocketHandler extends TextWebSocketHandler {
+    private static final Logger logger = LoggerFactory.getLogger(EventWebSocketHandler.class);
+    
+    private final ObjectMapper objectMapper;
+    private final String mqttBrokerUrl;
+    private final String mqttUsername;
+    private final String mqttPassword;
+    
+    // Track active sessions and their subscriptions
+    private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
+    private final Map<String, MqttClient> mqttClients = new ConcurrentHashMap<>();
+    private final Map<String, Map<String, Boolean>> subscriptions = new ConcurrentHashMap<>();
+    
+    public EventWebSocketHandler(ObjectMapper objectMapper, 
+                              @Value("${opencgmes.mqtt.broker}") String mqttBrokerUrl,
+                              @Value("${opencgmes.mqtt.username:}") String mqttUsername,
+                              @Value("${opencgmes.mqtt.password:}") String mqttPassword) {
+        this.objectMapper = objectMapper;
+        this.mqttBrokerUrl = mqttBrokerUrl;
+        this.mqttUsername = mqttUsername;
+        this.mqttPassword = mqttPassword;
+    }
+    
+    @Override
+    public void afterConnectionEstablished(WebSocketSession session) {
+        String sessionId = session.getId();
+        sessions.put(sessionId, session);
+        subscriptions.put(sessionId, new ConcurrentHashMap<>());
+        
+        try {
+            // Create MQTT client for this session
+            MqttClient mqttClient = createMqttClient(sessionId);
+            mqttClients.put(sessionId, mqttClient);
+            
+            logger.info("WebSocket connection established: {}", sessionId);
+        } catch (MqttException e) {
+            logger.error("Failed to create MQTT client for session: {}", sessionId, e);
+            try {
+                session.close(new CloseStatus(1011, "Failed to connect to MQTT broker"));
+            } catch (IOException ex) {
+                logger.error("Error closing WebSocket session", ex);
+            }
+        }
+    }
+    
+    @Override
+    protected void handleTextMessage(WebSocketSession session, TextMessage message) {
+        String sessionId = session.getId();
+        
+        try {
+            Map<String, Object> request = objectMapper.readValue(message.getPayload(), Map.class);
+            String action = (String) request.get("action");
+            
+            if ("subscribe".equals(action)) {
+                String topic = (String) request.get("topic");
+                subscribe(sessionId, topic);
+            } else if ("unsubscribe".equals(action)) {
+                String topic = (String) request.get("topic");
+                unsubscribe(sessionId, topic);
+            } else {
+                logger.warn("Unknown action: {}", action);
+            }
+        } catch (Exception e) {
+            logger.error("Error handling WebSocket message", e);
+        }
+    }
+    
+    @Override
+    public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
+        String sessionId = session.getId();
+        
+        // Clean up MQTT client
+        MqttClient mqttClient = mqttClients.remove(sessionId);
+        if (mqttClient != null && mqttClient.isConnected()) {
+            try {
+                mqttClient.disconnect();
+                mqttClient.close();
+            } catch (MqttException e) {
+                logger.error("Error closing MQTT client", e);
+            }
+        }
+        
+        // Remove session data
+        sessions.remove(sessionId);
+        subscriptions.remove(sessionId);
+        
+        logger.info("WebSocket connection closed: {}", sessionId);
+    }
+    
+    private MqttClient createMqttClient(String sessionId) throws MqttException {
+        String clientId = "ws-bridge-" + sessionId;
+        MqttClient mqttClient = new MqttClient(mqttBrokerUrl, clientId);
+        
+        MqttConnectOptions options = new MqttConnectOptions();
+        options.setCleanSession(true);
+        options.setAutomaticReconnect(true);
+        
+        if (mqttUsername != null && !mqttUsername.isEmpty()) {
+            options.setUserName(mqttUsername);
+            options.setPassword(mqttPassword.toCharArray());
+        }
+        
+        mqttClient.setCallback(new MqttCallback() {
+            @Override
+            public void connectionLost(Throwable cause) {
+                logger.warn("MQTT connection lost for session: {}", sessionId, cause);
+            }
+            
+            @Override
+            public void messageArrived(String topic, MqttMessage message) throws Exception {
+                WebSocketSession session = sessions.get(sessionId);
+                if (session != null && session.isOpen()) {
+                    // Forward MQTT message to WebSocket client
+                    Map<String, Object> event = objectMapper.readValue(message.getPayload(), Map.class);
+                    
+                    Map<String, Object> response = Map.of(
+                        "topic", topic,
+                        "event", event
+                    );
+                    
+                    session.sendMessage(new TextMessage(objectMapper.writeValueAsString(response)));
+                }
+            }
+            
+            @Override
+            public void deliveryComplete(IMqttDeliveryToken token) {
+                // Not used
+            }
+        });
+        
+        mqttClient.connect(options);
+        return mqttClient;
+    }
+    
+    private void subscribe(String sessionId, String topic) {
+        MqttClient mqttClient = mqttClients.get(sessionId);
+        Map<String, Boolean> sessionSubscriptions = subscriptions.get(sessionId);
+        
+        if (mqttClient != null && mqttClient.isConnected() && !sessionSubscriptions.containsKey(topic)) {
+            try {
+                mqttClient.subscribe(topic);
+                sessionSubscriptions.put(topic, true);
+                logger.debug("Session {} subscribed to topic: {}", sessionId, topic);
+            } catch (MqttException e) {
+                logger.error("Failed to subscribe to topic: {}", topic, e);
+            }
+        }
+    }
+    
+    private void unsubscribe(String sessionId, String topic) {
+        MqttClient mqttClient = mqttClients.get(sessionId);
+        Map<String, Boolean> sessionSubscriptions = subscriptions.get(sessionId);
+        
+        if (mqttClient != null && mqttClient.isConnected() && sessionSubscriptions.containsKey(topic)) {
+            try {
+                mqttClient.unsubscribe(topic);
+                sessionSubscriptions.remove(topic);
+                logger.debug("Session {} unsubscribed from topic: {}", sessionId, topic);
+            } catch (MqttException e) {
+                logger.error("Failed to unsubscribe from topic: {}", topic, e);
+            }
+        }
+    }
+}
+----
+
+=== Web Client Usage
+
+[source,javascript]
+----
+// Simple WebSocket client for the bridge
+class EventWebSocketClient {
+  constructor(url) {
+    this.url = url;
+    this.socket = null;
+    this.connected = false;
+    this.handlers = new Map();
+    
+    this.connect();
+  }
+  
+  connect() {
+    this.socket = new WebSocket(this.url);
+    
+    this.socket.onopen = () => {
+      console.log('WebSocket connected');
+      this.connected = true;
+      
+      // Resubscribe to all topics
+      this.handlers.forEach((handler, topic) => {
+        this._sendSubscribe(topic);
+      });
+    };
+    
+    this.socket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        const topic = data.topic;
+        const mqttEvent = data.event;
+        
+        console.debug('Received event:', topic, mqttEvent);
+        
+        // Call handlers for this topic
+        this.handlers.forEach((handler, patternTopic) => {
+          if (this._topicMatches(topic, patternTopic)) {
+            handler(mqttEvent, topic);
+          }
+        });
+      } catch (err) {
+        console.error('Error processing message:', err);
+      }
+    };
+    
+    this.socket.onclose = () => {
+      console.log('WebSocket disconnected');
+      this.connected = false;
+      
+      // Try to reconnect after a delay
+      setTimeout(() => this.connect(), 3000);
+    };
+    
+    this.socket.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      this.socket.close();
+    };
+  }
+  
+  subscribe(topic, handler) {
+    this.handlers.set(topic, handler);
+    
+    if (this.connected) {
+      this._sendSubscribe(topic);
+    }
+    
+    return topic;
+  }
+  
+  unsubscribe(topic) {
+    if (this.handlers.has(topic)) {
+      this.handlers.delete(topic);
+      
+      if (this.connected) {
+        this._sendUnsubscribe(topic);
+      }
+    }
+  }
+  
+  _sendSubscribe(topic) {
+    this.socket.send(JSON.stringify({
+      action: 'subscribe',
+      topic: topic
+    }));
+  }
+  
+  _sendUnsubscribe(topic) {
+    this.socket.send(JSON.stringify({
+      action: 'unsubscribe',
+      topic: topic
+    }));
+  }
+  
+  _topicMatches(actualTopic, patternTopic) {
+    // Simple topic matching that handles wildcards
+    const patternParts = patternTopic.split('/');
+    const actualParts = actualTopic.split('/');
+    
+    if (patternParts.length > actualParts.length && patternParts[patternParts.length - 1] !== '#') {
+      return false;
+    }
+    
+    for (let i = 0; i < patternParts.length; i++) {
+      if (patternParts[i] === '#') {
+        return true;
+      }
+      
+      if (patternParts[i] !== '+' && patternParts[i] !== actualParts[i]) {
+        return false;
+      }
+    }
+    
+    return patternParts.length === actualParts.length || 
+           (patternParts[patternParts.length - 1] === '#');
+  }
+  
+  disconnect() {
+    if (this.socket && this.connected) {
+      this.socket.close();
+    }
+  }
+}
+
+// Usage example
+const client = new EventWebSocketClient('ws://localhost:8080/api/v1/events/websocket');
+
+// Subscribe to repository events
+client.subscribe('opencgmes/repository/#', (event) => {
+  console.log('Repository event:', event);
+  updateRepositoryStatus(event);
+});
+
+// Subscribe to branch merge events
+client.subscribe('opencgmes/branch/+/+/merged', (event) => {
+  console.log('Branch merged:', event);
+  showNotification(`Branch ${event.details.sourceBranch} merged into ${event.details.targetBranch}`);
+  refreshBranchView();
+});
+----
+
+== Example Use Cases
+
+=== Real-Time Collaborative Editing
+
+This sequence diagram illustrates how the event system enables real-time collaborative editing:
+
+[plantuml]
+----
+@startuml
+participant "User A\nUI" as UserA
+participant "User B\nUI" as UserB
+participant "OpenCGMES\nServer" as Server
+participant "MQTT\nBroker" as Broker
+
+UserA -> Server: Create branch "feature-x"
+Server -> Broker: Publish branch/created event
+Broker -> UserB: Forward event
+UserB -> UserB: Update branch list
+
+UserA -> Server: Edit transformer in "feature-x"
+Server -> Broker: Publish graph/updated event
+Broker -> UserB: Forward event
+UserB -> UserB: Update status indicator
+
+UserB -> Server: Create branch "feature-y"
+Server -> Broker: Publish branch/created event
+Broker -> UserA: Forward event
+UserA -> UserA: Update branch list
+
+UserA -> Server: Merge "feature-x" to main
+Server -> Broker: Publish branch/merged event
+Broker -> UserB: Forward event
+UserB -> UserB: Show notification
+@enduml
+----
+
+=== CI/CD Integration
+
+This example shows how to integrate the event system with CI/CD pipelines:
+
+[source,bash]
+----
+#!/bin/bash
+# opencgmes-ci.sh - CI/CD script for CGMES model validation
+
+# Configuration
+BROKER="localhost"
+PORT="1883"
+USERNAME="opencgmes"
+PASSWORD="password"
+API_URL="https://opencgmes-server/api/v1"
+MODEL_FILE="$1"
+OUTPUT_DIR="$2"
+
+if [ -z "$MODEL_FILE" ] || [ -z "$OUTPUT_DIR" ]; then
+  echo "Usage: $0 <model_file> <output_dir>"
+  exit 1
+fi
+
+# Generate a unique identifier for this job
+JOB_ID=$(uuidgen | tr -d '-')
+MODEL_FILENAME=$(basename "$MODEL_FILE")
+echo "Starting validation job $JOB_ID for $MODEL_FILENAME"
+
+# Import the model file
+echo "Importing model..."
+IMPORT_RESPONSE=$(curl -s -X POST -F "file=@$MODEL_FILE" "$API_URL/model")
+HTTP_STATUS=$?
+
+if [ $HTTP_STATUS -ne 0 ]; then
+  echo "Error importing model: HTTP status $HTTP_STATUS"
+  exit 1
+fi
+
+# Start validation
+echo "Starting validation..."
+VALIDATION_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" \
+  -d '{"shaclFiles":["EQ_452.rdf","SSH_301.rdf"]}' \
+  "$API_URL/model/$MODEL_FILENAME/validate")
+
+echo "Waiting for validation results..."
+
+# Subscribe to validation events for this model
+mosquitto_sub -h $BROKER -p $PORT -u $USERNAME -P $PASSWORD \
+  -t "opencgmes/view/$MODEL_FILENAME/validated" -C 1 > "$OUTPUT_DIR/validation_event.json"
+
+# Process validation results
+echo "Processing validation results..."
+CONFORMS=$(jq -r '.details.conforms' "$OUTPUT_DIR/validation_event.json")
+VIOLATIONS=$(jq -r '.details.summary.violations' "$OUTPUT_DIR/validation_event.json")
+WARNINGS=$(jq -r '.details.summary.warnings' "$OUTPUT_DIR/validation_event.json")
+INFOS=$(jq -r '.details.summary.infos' "$OUTPUT_DIR/validation_event.json")
+
+echo "Validation results:"
+echo "  Conforms: $CONFORMS"
+echo "  Violations: $VIOLATIONS"
+echo "  Warnings: $WARNINGS"
+echo "  Infos: $INFOS"
+
+# Fetch detailed validation results
+if [ "$CONFORMS" = "false" ]; then
+  echo "Fetching detailed validation results..."
+  curl -s "$API_URL/model/$MODEL_FILENAME/validation-results/EQ_452.rdf?severity=violation" \
+    > "$OUTPUT_DIR/eq_violations.json"
+  curl -s "$API_URL/model/$MODEL_FILENAME/validation-results/SSH_301.rdf?severity=violation" \
+    > "$OUTPUT_DIR/ssh_violations.json"
+fi
+
+# Determine exit code based on validation results
+if [ "$CONFORMS" = "true" ]; then
+  echo "Validation successful!"
+  exit 0
+else
+  echo "Validation failed with $VIOLATIONS violations"
+  exit 1
+fi
+----
+
+=== Live Visualization
+
+This example shows how to create a live dashboard that updates in real-time:
+
+[source,html]
+----
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCGMES Live Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+    .dashboard { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .card { 
+      border: 1px solid #ddd; 
+      border-radius: 8px; 
+      padding: 15px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .event-log {
+      height: 300px;
+      overflow-y: auto;
+      background: #f5f5f5;
+      padding: 10px;
+      font-family: monospace;
+      font-size: 12px;
+      border-radius: 4px;
+    }
+    .event-item {
+      border-bottom: 1px solid #ddd;
+      padding: 5px 0;
+    }
+    .event-timestamp {
+      color: #888;
+      font-size: 11px;
+    }
+    .chart-container {
+      height: 300px;
+    }
+    .status-indicator {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      margin-right: 5px;
+    }
+    .status-good { background-color: #4caf50; }
+    .status-warning { background-color: #ff9800; }
+    .status-error { background-color: #f44336; }
+  </style>
+</head>
+<body>
+  <h1>OpenCGMES Live Dashboard</h1>
+  
+  <div class="dashboard">
+    <div class="card">
+      <h2>System Status</h2>
+      <div id="system-status">
+        <p><span id="repository-status-indicator" class="status-indicator"></span> Repository: <span id="repository-status">Unknown</span></p>
+        <p><span id="mqtt-status-indicator" class="status-indicator"></span> MQTT Broker: <span id="mqtt-status">Disconnected</span></p>
+        <p>Active Models: <span id="active-models-count">0</span></p>
+        <p>Active Branches: <span id="active-branches-count">0</span></p>
+      </div>
+    </div>
+    
+    <div class="card">
+      <h2>Event Statistics</h2>
+      <div id="event-stats">
+        <canvas id="event-chart" class="chart-container"></canvas>
+      </div>
+    </div>
+    
+    <div class="card">
+      <h2>Recent Events</h2>
+      <div id="event-log" class="event-log"></div>
+    </div>
+    
+    <div class="card">
+      <h2>Active Models</h2>
+      <div id="active-models"></div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+  
+  <script>
+    // Dashboard state
+    const state = {
+      models: new Map(),
+      branches: new Map(),
+      eventStats: {
+        repository: 0,
+        view: 0,
+        branch: 0,
+        graph: 0
+      },
+      recentEvents: []
+    };
+    
+    // Connect to MQTT broker
+    const client = mqtt.connect('ws://localhost:9001', {
+      username: 'opencgmes',
+      password: 'password',
+      clientId: 'dashboard-' + Math.random().toString(16).substring(2, 10)
+    });
+    
+    client.on('connect', () => {
+      console.log('Connected to MQTT broker');
+      document.getElementById('mqtt-status').textContent = 'Connected';
+      document.getElementById('mqtt-status-indicator').className = 'status-indicator status-good';
+      
+      // Subscribe to all OpenCGMES events
+      client.subscribe('opencgmes/#');
+    });
+    
+    client.on('message', (topic, message) => {
+      try {
+        const event = JSON.parse(message.toString());
+        console.debug('Received event:', topic, event);
+        
+        // Add to recent events
+        addEvent(topic, event);
+        
+        // Update statistics
+        updateStatistics(topic, event);
+        
+        // Update model/branch tracking
+        if (topic.includes('/view/') && topic.endsWith('/created')) {
+          addModel(event.componentId, event);
+        } else if (topic.includes('/branch/') && topic.endsWith('/created')) {
+          const parts = event.componentId.split('/');
+          if (parts.length === 2) {
+            addBranch(parts[0], parts[1], event);
+          }
+        }
+      } catch (err) {
+        console.error('Error processing message:', err);
+      }
+    });
+    
+    client.on('error', (err) => {
+      console.error('MQTT error:', err);
+      document.getElementById('mqtt-status').textContent = 'Error: ' + err.message;
+      document.getElementById('mqtt-status-indicator').className = 'status-indicator status-error';
+    });
+    
+    client.on('offline', () => {
+      document.getElementById('mqtt-status').textContent = 'Disconnected';
+      document.getElementById('mqtt-status-indicator').className = 'status-indicator status-error';
+    });
+    
+    // Initialize chart
+    const ctx = document.getElementById('event-chart').getContext('2d');
+    const eventChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: ['Repository', 'View', 'Branch', 'Graph'],
+        datasets: [{
+          label: 'Event Count',
+          data: [0, 0, 0, 0],
+          backgroundColor: [
+            'rgba(255, 99, 132, 0.2)',
+            'rgba(54, 162, 235, 0.2)',
+            'rgba(255, 206, 86, 0.2)',
+            'rgba(75, 192, 192, 0.2)'
+          ],
+          borderColor: [
+            'rgba(255, 99, 132, 1)',
+            'rgba(54, 162, 235, 1)',
+            'rgba(255, 206, 86, 1)',
+            'rgba(75, 192, 192, 1)'
+          ],
+          borderWidth: 1
+        }]
+      },
+      options: {
+        scales: {
+          y: {
+            beginAtZero: true
+          }
+        },
+        maintainAspectRatio: false
+      }
+    });
+    
+    // Update UI functions
+    function addEvent(topic, event) {
+      const eventLog = document.getElementById('event-log');
+      const eventItem = document.createElement('div');
+      eventItem.className = 'event-item';
+      
+      const timestamp = new Date(event.timestamp).toLocaleTimeString();
+      
+      eventItem.innerHTML = `
+        <div class="event-timestamp">${timestamp}</div>
+        <div><strong>${topic}</strong></div>
+        <div>${JSON.stringify(event.details)}</div>
+      `;
+      
+      eventLog.insertBefore(eventItem, eventLog.firstChild);
+      
+      // Limit to 100 events
+      state.recentEvents.unshift({ topic, event });
+      if (state.recentEvents.length > 100) {
+        state.recentEvents.pop();
+      }
+      
+      // Trim event log DOM
+      while (eventLog.children.length > 100) {
+        eventLog.removeChild(eventLog.lastChild);
+      }
+    }
+    
+    function updateStatistics(topic, event) {
+      // Update event type counts
+      if (topic.startsWith('opencgmes/repository/')) {
+        state.eventStats.repository++;
+      } else if (topic.startsWith('opencgmes/view/')) {
+        state.eventStats.view++;
+      } else if (topic.startsWith('opencgmes/branch/')) {
+        state.eventStats.branch++;
+      } else if (topic.startsWith('opencgmes/graph/')) {
+        state.eventStats.graph++;
+      }
+      
+      // Update chart
+      eventChart.data.datasets[0].data = [
+        state.eventStats.repository,
+        state.eventStats.view,
+        state.eventStats.branch,
+        state.eventStats.graph
+      ];
+      eventChart.update();
+      
+      // Update repository status
+      if (topic === 'opencgmes/system/health') {
+        const status = event.details.repositoryStatus;
+        document.getElementById('repository-status').textContent = status;
+        
+        const indicator = document.getElementById('repository-status-indicator');
+        if (status === 'healthy') {
+          indicator.className = 'status-indicator status-good';
+        } else if (status === 'degraded') {
+          indicator.className = 'status-indicator status-warning';
+        } else {
+          indicator.className = 'status-indicator status-error';
+        }
+      }
+    }
+    
+    function addModel(modelId, event) {
+      if (!state.models.has(modelId)) {
+        state.models.set(modelId, {
+          id: modelId,
+          createdAt: event.timestamp,
+          branches: new Set()
+        });
+        
+        updateModelsList();
+      }
+    }
+    
+    function addBranch(modelId, branchId, event) {
+      if (state.models.has(modelId)) {
+        const model = state.models.get(modelId);
+        model.branches.add(branchId);
+        
+        state.branches.set(`${modelId}/${branchId}`, {
+          modelId,
+          branchId,
+          createdAt: event.timestamp
+        });
+        
+        updateModelsList();
+        document.getElementById('active-branches-count').textContent = state.branches.size;
+      }
+    }
+    
+    function updateModelsList() {
+      const modelsContainer = document.getElementById('active-models');
+      modelsContainer.innerHTML = '';
+      
+      state.models.forEach(model => {
+        const modelElement = document.createElement('div');
+        modelElement.innerHTML = `
+          <h3>${model.id}</h3>
+          <p>Created: ${new Date(model.createdAt).toLocaleString()}</p>
+          <p>Branches: ${Array.from(model.branches).join(', ') || 'None'}</p>
+        `;
+        modelsContainer.appendChild(modelElement);
+      });
+      
+      document.getElementById('active-models-count').textContent = state.models.size;
+    }
+    
+    // Initialize repository status
+    document.getElementById('repository-status-indicator').className = 'status-indicator status-warning';
+    document.getElementById('repository-status').textContent = 'Connecting...';
+    
+    // Use the REST API to get initial state
+    fetch('/api/v1/model')
+      .then(response => response.json())
+      .then(models => {
+        models.forEach(model => {
+          addModel(model.filename, {
+            componentId: model.filename,
+            timestamp: model.importedAt
+          });
+        });
+        
+        // After loading models, load branches
+        return Promise.all(models.map(model => 
+          fetch(`/api/v1/model/${model.filename}/branch`)
+            .then(response => response.json())
+            .then(branches => {
+              branches.forEach(branch => {
+                addBranch(model.filename, branch.name, {
+                  componentId: `${model.filename}/${branch.name}`,
+                  timestamp: branch.createdAt
+                });
+              });
+            })
+        ));
+      })
+      .then(() => {
+        console.log('Initial state loaded');
+      })
+      .catch(err => {
+        console.error('Error loading initial state:', err);
+      });
+  </script>
+</body>
+</html>
+----
+
+== Conclusion
+
+The examples provided in this document demonstrate practical approaches to implementing the MQTT event system for OpenCGMES. These implementations are designed to be flexible, efficient, and maintainable, following best practices for event-driven architectures. 
+
+When implementing the event system, consider:
+
+1. *Error Handling*: Implement robust error handling and recovery mechanisms for both publishers and subscribers.
+2. *Performance*: Use asynchronous processing and batching for high-frequency events.
+3. *Security*: Configure authentication, authorization, and TLS/SSL for all MQTT connections.
+4. *Monitoring*: Add logging and metrics to track event system performance and health.
+
+By following these guidelines and extending the provided examples, you can create a reliable and scalable event system that enhances the capabilities of OpenCGMES for real-time collaboration and integration.
