@@ -1,0 +1,243 @@
+# SHACL Validation Integration for OpenCGMES
+
+## Overview
+
+This document describes the architecture and implementation details for integrating SHACL (Shapes Constraint Language) validation into OpenCGMES. SHACL validation is essential for ensuring that CGMES models conform to the required constraints and business rules defined by ENTSO-E and other energy authorities.
+
+## SHACL Repository Design
+
+### Repository Structure
+
+The SHACL validation system is built around a dedicated repository for SHACL validation files:
+
+```
+                  +------------------+
+                  | SHACL Repository |
+                  +------------------+
+                           |
+                           v
+          +--------------------------------+
+          | Named Graphs (SHACL Profiles) |
+          +--------------------------------+
+                  |            |
+                  v            v
+      +----------------+  +----------------+
+      | sh:EQ_452.rdf  |  | sh:SSH_301.rdf |  ...
+      +----------------+  +----------------+
+```
+
+Key aspects of the SHACL repository:
+
+1. **Read-Only Storage**: The repository contains SHACL shape files that are treated as read-only resources.
+
+2. **Graph Naming Convention**: Each SHACL file is loaded into a named graph using the filename as the identifier.
+   - Example: `sh:EQ_452.rdf` for a file named "EQ_452.rdf"
+
+3. **File Management**: 
+   - Files can be bundled with the application 
+   - Additional files can be loaded from user-specified locations
+   - ENTSO-E published SHACL files are supported
+
+### Profile Organization
+
+SHACL files are organized based on their target CGMES profiles:
+
+1. **Basic Profile Validation**:
+   - Multiple SHACL files per CGMES profile (EQ, TP, SSH, SV, DL, GL)
+   - Files implement specific aspects of validation (topology, electrical parameters, naming conventions)
+
+2. **Specialized Validation**:
+   - Single SHACL file for specialized profiles or custom validation rules
+   - Support for user-defined validation rules
+
+## Validation Process
+
+### Execution Flow
+
+The validation process follows these steps:
+
+```
++----------------+    +----------------+    +----------------+
+|  Select Model  | -> |  Select SHACL  | -> | Run Validation |
+|   or Branch    |    | Files/Profiles |    |                |
++----------------+    +----------------+    +----------------+
+                                                    |
+                                                    v
+                                        +--------------------+
+                                        | Generate Results   |
+                                        | in Results Graph   |
+                                        +--------------------+
+```
+
+1. **Selection**: User selects a model or branch and one or more SHACL files/profiles to validate against.
+
+2. **Preparation**: System creates appropriate dataset views combining:
+   - The model data to be validated
+   - The selected SHACL files
+
+3. **Execution**: SHACL validation engine runs the validation process.
+
+4. **Results**: Validation results are generated in a dedicated graph.
+
+### Results Management
+
+Validation results are stored using the following approach:
+
+1. **Results Graph Naming**:
+   - Results are stored in a named graph using the pattern `sh:{shaclFileName}`
+   - Example: `sh:EQ_452.rdf` for results of validating with EQ_452.rdf
+
+2. **Results Persistence**:
+   - By default, new validation runs override previous results for the same SHACL file
+   - This ensures that only the most recent validation results are maintained
+   - Reduces memory usage while providing current validation status
+
+3. **Optional Extension - Historical Results**:
+   - For use cases requiring historical validation tracking
+   - Results can be stored with timestamped graph names: `sh:{shaclFileName}.{timestamp}`
+   - Example: `sh:EQ_452.rdf.20250316T123045Z`
+
+### Results Format
+
+Validation results follow the standard SHACL results format:
+
+```turtle
+# Example validation result (simplified)
+_:result1 a sh:ValidationResult ;
+  sh:resultSeverity sh:Violation ;
+  sh:focusNode <urn:uuid:71d4b744-3b84-40f0-b17f-9a49a82ff18a> ;
+  sh:resultPath cim:Equipment.EquipmentContainer ;
+  sh:resultMessage "Equipment must belong to a container" .
+```
+
+Results include:
+- Severity level (Violation, Warning, Info)
+- Focus node (the resource that failed validation)
+- Result path (the property that failed validation)
+- Message describing the issue
+- Source shape that triggered the validation failure
+
+## Integration with Model Views
+
+### Adding Validation Results to Model Views
+
+When validation is performed on a model or branch, the validation results are:
+
+1. Added to the corresponding model view or branch view
+2. Made available through the same dataset structure
+3. Queryable using SPARQL alongside the model data
+
+### View Naming Convention
+
+For a model with filename "grid_model_2025.xml":
+
+- Basic model: `/model/grid_model_2025.xml/query`
+- Validation results: Available in named graphs within the same view
+  - Query with: `FROM NAMED <sh:EQ_452.rdf> ...`
+
+For a branch named "feature-x":
+
+- Branch view: `/model/grid_model_2025.xml/branch/feature-x/query`
+- Validation results: Available in named graphs within the same branch view
+  - Query with: `FROM NAMED <sh:EQ_452.rdf> ...`
+
+## API Design
+
+### REST Endpoints
+
+The API provides these key endpoints for SHACL validation:
+
+1. **List Available SHACL Files**:
+```
+GET /shacl/files
+```
+
+2. **Run Validation on Model**:
+```
+POST /model/{filename}/validate
+```
+With request body:
+```json
+{
+  "shaclFiles": ["EQ_452.rdf", "SSH_301.rdf"]
+}
+```
+
+3. **Run Validation on Branch**:
+```
+POST /model/{filename}/branch/{branchName}/validate
+```
+
+4. **Get Validation Results**:
+```
+GET /model/{filename}/validation-results/{shaclFileName}
+```
+
+5. **Get Branch Validation Results**:
+```
+GET /model/{filename}/branch/{branchName}/validation-results/{shaclFileName}
+```
+
+### Query Parameters
+
+Results retrieval supports these parameters:
+
+- `format`: Response format (json, xml, turtle, etc.)
+- `severity`: Filter by severity (violation, warning, info)
+- `limit`: Maximum number of results
+- `offset`: Pagination offset
+- `includeValid`: Whether to include valid nodes (default: false)
+
+### Response Format
+
+Standard validation results response:
+
+```json
+{
+  "conforms": false,
+  "results": [
+    {
+      "severity": "violation",
+      "focusNode": "urn:uuid:71d4b744-3b84-40f0-b17f-9a49a82ff18a",
+      "resultPath": "cim:Equipment.EquipmentContainer",
+      "message": "Equipment must belong to a container",
+      "sourceShape": "sh:EQ_452.rdf#EquipmentContainerRule"
+    },
+    // Additional results...
+  ],
+  "summary": {
+    "violations": 12,
+    "warnings": 5,
+    "infos": 3
+  }
+}
+```
+
+## Implementation Considerations
+
+### Performance Optimization
+
+SHACL validation can be resource-intensive. Consider these optimizations:
+
+1. **Lazy Loading**: Load SHACL files on-demand rather than preloading all
+2. **Incremental Validation**: For branches, validate only changed components when possible
+3. **Parallel Processing**: Run validation of independent SHACL files in parallel
+4. **Memory Management**: Release validation results when no longer needed
+
+### User Experience
+
+To enhance usability:
+
+1. **Grouping**: Group SHACL files by profile or validation purpose
+2. **Presets**: Provide preset combinations of SHACL files for common validation scenarios
+3. **Summary Views**: Offer high-level summaries of validation issues
+4. **Severity Filtering**: Allow users to focus on critical issues first
+
+### Advanced Features
+
+Future enhancements to consider:
+
+1. **Custom Rule Creation**: User interface for creating custom SHACL rules
+2. **Rule Parameterization**: Allow parameters in SHACL rules for flexible validation
+3. **Automatic Fixing**: Suggest or apply automatic fixes for common validation issues
+4. **Validation Scheduling**: Periodic validation for long-lived branches
