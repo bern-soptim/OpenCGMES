@@ -28,7 +28,7 @@ import org.apache.jena.util.iterator.ExtendedIterator;
 import org.apache.jena.util.iterator.NullIterator;
 
 /**
- * Extends the Apache Jena MultiUnion but {@link #find } and {@link #stream } do not eliminiate
+ * Extends the Apache Jena MultiUnion but {@link #find } and {@link #stream } do not eliminate
  * duplicates.
  * This implementation is based on
  * <a
