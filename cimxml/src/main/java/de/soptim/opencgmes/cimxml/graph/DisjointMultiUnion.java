@@ -28,7 +28,9 @@ import org.apache.jena.util.iterator.ExtendedIterator;
 import org.apache.jena.util.iterator.NullIterator;
 
 /**
- * Extends the Apache Jena MultiUnion but find does not eliminiate duplicates This is based on from
+ * Extends the Apache Jena MultiUnion but {@link #find } and {@link #stream } do not eliminiate
+ * duplicates.
+ * This implementation is based on
  * <a
  * href="https://github.com/apache/jena/blob/master/jena-core/src/main/java/org/apache/jena/graph/compose/MultiUnion.java"
  * />.

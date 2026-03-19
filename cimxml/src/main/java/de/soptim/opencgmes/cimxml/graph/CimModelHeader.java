@@ -88,20 +88,27 @@ public interface CimModelHeader extends CimGraph {
    *                               header graph.
    */
   default Node getModel() {
-    var iter = find(Node.ANY, RDF.type.asNode(), CimHeaderVocabulary.TYPE_FULL_MODEL);
+    final var itFullModel = find(Node.ANY, RDF.type.asNode(), CimHeaderVocabulary.TYPE_FULL_MODEL);
     try {
-      if (iter.hasNext()) {
-        return iter.next().getSubject();
+      if (itFullModel.hasNext()) {
+        return itFullModel.next().getSubject();
       }
-      iter = find(Node.ANY, RDF.type.asNode(), CimHeaderVocabulary.TYPE_DIFFERENCE_MODEL);
-      if (iter.hasNext()) {
-        return iter.next().getSubject();
-      }
-      throw new IllegalStateException(
-          "Found neither FullModel nor DifferenceModel in the header graph.");
     } finally {
-      iter.close();
+      itFullModel.close();
     }
+
+    final var itDiffModel
+        = find(Node.ANY, RDF.type.asNode(), CimHeaderVocabulary.TYPE_DIFFERENCE_MODEL);
+    try {
+      if (itDiffModel.hasNext()) {
+        return itDiffModel.next().getSubject();
+      }
+    } finally {
+      itDiffModel.close();
+    }
+
+    throw new IllegalStateException(
+        "Found neither FullModel nor DifferenceModel in the header graph.");
   }
 
   /**
