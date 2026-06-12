@@ -524,8 +524,8 @@ public class ParserCIMXML_StAX_SR {
                         RDFXMLparseWarning("No CimProfileRegistry has been provided, so missing datatypes in CIMXML cannot be resolved.", location);
                     } else {
                         currentDataTypeMap = cimProfileRegistry.getHeaderPropertiesAndDatatypes(versionOfCIMXML);
-                        if (currentDataTypeMap == null) {
-                            RDFXMLparseWarning("No header profile has been registered for CIM version " + versionOfCIMXML, location);
+                        if (currentDataTypeMap == null || currentDataTypeMap.isEmpty()) {
+                            RDFXMLparseWarning("No header profile has been registered for CIMXML version " + versionOfCIMXML, location);
                         }
                         currentListOfPropertiesNotInProfile = new HashSet<>();
                     }
@@ -578,7 +578,7 @@ public class ParserCIMXML_StAX_SR {
         }
         currentListOfPropertiesNotInProfile = new HashSet<>();
         currentDataTypeMap = cimProfileRegistry.getPropertiesAndDatatypes(currentCimProfiles);
-        if (currentDataTypeMap == null) {
+        if (currentDataTypeMap == null || currentDataTypeMap.isEmpty()) {
             RDFXMLparseWarning("The profiles in the model header could not be found in the CimProfileRegistry. Profiles: " + currentCimProfiles.toString(), location);
         }
     }
